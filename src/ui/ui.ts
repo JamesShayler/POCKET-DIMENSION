@@ -162,7 +162,9 @@ export class UI {
     this.panelBusy = true;
     client.panel(sel.kind, sel.id, sel.extra, following, this.followFamily).then((html) => {
       this.panelBusy = false;
-      if (this.sel !== sel || html === this.lastPanelHtml) return;
+      // the selection changed while this was on its way: ask again for the new one
+      if (this.sel !== sel) { this.renderPanel(); return; }
+      if (html === this.lastPanelHtml) return;
       const p = this.el('panel');
       const top = p.scrollTop;
       this.lastPanelHtml = html;

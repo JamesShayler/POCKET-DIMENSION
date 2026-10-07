@@ -17,6 +17,16 @@ import type { SimEvent } from '../sim/events';
 import { ACT, CARGO, OCCS } from '../shared/protocol';
 import type { AnimalPop, BuildingBlock, EventLite, FollowTarget, FromWorker, PeopleBlock, SettlementLite, Snapshot, ToWorker } from '../shared/protocol';
 
+/** Panel text for the page; a failure is reported in the panel instead of leaving the page waiting for an answer. */
+function safeHtml(f: () => string): string {
+  try {
+    return f();
+  } catch (err) {
+    console.error(err);
+    return `<p class="muted">This could not be shown (${String(err).replace(/[<&]/g, '')}).</p>`;
+  }
+}
+
 const ctx = self as unknown as DedicatedWorkerGlobalScope;
 const post = (m: FromWorker, transfer: Transferable[] = []) => ctx.postMessage(m, transfer);
 
@@ -55,9 +65,9 @@ function handle(m: ToWorker) {
     case 'cancelJump': e.cancelJump(); break;
     case 'camera': cam = { x: m.x, y: m.y, km: m.km, alt: m.alt }; w.focus = { x: m.x, y: m.y }; break;
     case 'follow': follow = m.target; family = m.family; break;
-    case 'panel': post({ t: 'html', req: m.req, html: panels!.panel(m.kind, m.id, m.extra, m.following, m.family) }); break;
-    case 'almanac': post({ t: 'html', req: m.req, html: panels!.almanac(m.tab, m.filters) }); break;
-    case 'dev': fps = m.fps; post({ t: 'html', req: m.req, html: panels!.dev(m.fps, rate(e.effective), e.stepMs, devLog, determinism) }); break;
+    case 'panel': post({ t: 'html', req: m.req, html: safeHtml(() => panels!.panel(m.kind, m.id, m.extra, m.following, m.family)) }); break;
+    case 'almanac': post({ t: 'html', req: m.req, html: safeHtml(() => panels!.almanac(m.tab, m.filters)) }); break;
+    case 'dev': fps = m.fps; post({ t: 'html', req: m.req, html: safeHtml(() => panels!.dev(m.fps, rate(e.effective), e.stepMs, devLog, determinism)) }); break;
     case 'save': saveToBrowser(w).then(() => post({ t: 'toast', msg: 'Universe saved.' }), (err) => post({ t: 'toast', msg: 'Save failed: ' + String(err) })); break;
     case 'export': post({ t: 'export', name: `pocket-dimension-${w.seedText}-y${yearOf(w.day)}.json`, json: serialize(w) }); break;
     case 'replay': replayCheck(); break;
