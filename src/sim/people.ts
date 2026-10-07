@@ -28,7 +28,7 @@ export type Occupation =
 
 export type MemoryKind =
   | 'born' | 'helped' | 'betrayed' | 'disaster' | 'famine' | 'family death' | 'discovery' | 'migration' | 'war' | 'raid'
-  | 'leader' | 'revelation' | 'exile' | 'marriage' | 'birth of child' | 'plague' | 'founded' | 'art' | 'voyage';
+  | 'leader' | 'revelation' | 'exile' | 'marriage' | 'birth of child' | 'plague' | 'founded' | 'art' | 'voyage' | 'experiment';
 
 export interface Memory {
   day: number;

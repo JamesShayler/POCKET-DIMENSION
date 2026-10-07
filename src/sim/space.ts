@@ -4,6 +4,9 @@ import { Rng, clamp, hashStr } from './rng';
 import { H, N, NBR8, R_KM, W, distKm, idx, wrapX } from './grid';
 import { DAYS_PER_YEAR } from './time';
 import { NATURAL_PHONOLOGY, makeWord } from './names';
+import type { Person } from './people';
+import { mastery, oceanGoing } from './techfx';
+import { ledgerOf, practise } from './research';
 
 /**
  * The rest of the solar system, and what people put into it; plus the long-distance transport network (sea lanes and air
@@ -58,6 +61,8 @@ export interface Mission {
   arrive: number;
   landed: boolean;
   done: boolean;
+  /** how well the art behind it was mastered at launch (older saves: fully) */
+  skill?: number;
 }
 
 export interface Route {
@@ -80,6 +85,10 @@ export interface CivSpace {
   firstSatellite: number;
   crewed: number;
   moonLanding: number;
+  /** crews lost, moon missions lost, and the day crewed flights may resume */
+  crewLost?: number;
+  moonFails?: number;
+  grounded?: number;
 }
 
 export class Space {
@@ -159,7 +168,10 @@ export class Space {
     return p;
   }
 
-  /** Once per season: launches, missions arriving, orbits decaying. */
+  /**
+   * Once per season: launches, missions arriving, orbits decaying. Rockets explode and capsules are lost until the arts
+   * behind them are mastered: every launch is practice, and a lost crew grounds a programme for years.
+   */
   season() {
     const w = this.world;
     const day = w.day;
@@ -169,38 +181,83 @@ export class Space {
       const pad = civ.members.map((id) => w.settlements[id - 1]).find((s) => s && s.abandoned < 0 && s.tech.has('rocketry') && w.buildings.count(s.id, 'launchpad') > 0);
       if (!pad) continue;
       const prog = this.program(civ.id);
-      const crewedAge = pad.tech.has('spaceflight');
+      const mR = mastery(pad, 'rocketry'), mS = mastery(pad, 'spaceflight');
+      const crewedAge = mS >= 0.3 && (prog.grounded ?? 0) <= day;
       const rate = (crewedAge ? 0.9 : 0.35) * clamp(civ.pop / 600, 0.3, 2);
       if (rng.next() > 1 - Math.exp(-rate)) continue;
       prog.launches++;
-      const failRate = Math.max(0.03, 0.35 - prog.launches * 0.02);
-      if (rng.next() < failRate) {
+      const roll = rng.next(); // what this launch is for is decided before it flies
+      practise(pad, 'rocketry', 0.03);
+      const explodeP = clamp(0.03 + 0.72 * Math.pow(1 - mR, 1.4), 0.03, 0.75);
+      if (rng.next() < explodeP) {
         prog.failures++;
-        w.history.record('DISASTER', day, `A ${civ.name} rocket exploded ${rng.next() < 0.5 ? 'on the pad' : 'during ascent'} at ${pad.name}.`, prog.launches < 6 ? 2 : 1, {
-          civ: civ.id, settlement: pad.id, x: pad.x, y: pad.y, cause: 'Rocketry is unforgiving: a fault in an engine, a valve or the guidance destroyed the vehicle.',
+        practise(pad, 'rocketry', 0.02);
+        const L = ledgerOf(w, 'satellite');
+        L.f++;
+        const dead = rng.next() < 0.25 ? this.padCrew(pad, 1 + rng.int(2)) : [];
+        for (const p of dead) w.die(p, 'a rocket explosion');
+        L.k += dead.length;
+        const want = L.first < 0 ? 2 : prog.launches <= 5 ? 1 : 0;
+        w.history.record('EXPERIMENT', day, `A ${civ.name} rocket exploded ${rng.next() < 0.5 ? 'on the pad' : 'during ascent'} at ${pad.name}${dead.length ? `, killing ${dead.map((p) => p.name).join(' and ')}` : ''}.`, this.weight(want), {
+          persons: dead.map((p) => p.id), civ: civ.id, settlement: pad.id, x: pad.x, y: pad.y,
+          cause: `Rocketry is unforgiving: ${pad.name}'s rockets were ${Math.round(mR * 100)}% mastered, and this was launch ${prog.launches}.`,
         });
         continue;
       }
-      // what goes up: satellites first; then crews, stations and missions beyond orbit
-      const roll = rng.next();
-      if (!crewedAge || prog.firstSatellite < 0 || roll < 0.5) this.launchSatellite(civ.id, pad, prog, rng);
-      else if (prog.crewed === 0 || roll < 0.65) {
+      if (!crewedAge || prog.firstSatellite < 0 || roll < 0.5) {
+        // a satellite (or, while crews are not yet trusted to them, an uncrewed test of a capsule)
+        if (mS > 0 && !crewedAge) practise(pad, 'spaceflight', 0.02);
+        if (rng.next() < clamp(mR / 0.45, 0, 1)) this.launchSatellite(civ.id, pad, prog, rng);
+        else {
+          prog.failures++;
+          const L = ledgerOf(w, 'satellite');
+          L.f++;
+          w.history.record('EXPERIMENT', day, `A ${civ.name} satellite launched from ${pad.name} fell back short of orbit.`, this.weight(L.first < 0 ? 1 : 0), {
+            civ: civ.id, settlement: pad.id, x: pad.x, y: pad.y, cause: `The rocket could not yet reach orbital speed (rocketry ${Math.round(mR * 100)}% mastered).`,
+          });
+        }
+        continue;
+      }
+      if (prog.crewed === 0 || roll < 0.65) {
+        const Lo = ledgerOf(w, 'orbit');
+        const crew = this.crew(pad, prog.crewed < 2 ? 1 : 2);
+        const name = makeWord(NATURAL_PHONOLOGY, rng, 2);
+        Lo.n++;
+        if (rng.next() < 0.02 + 0.5 * Math.pow(1 - mS, 1.5)) {
+          for (const p of crew) w.die(p, 'a rocket explosion');
+          prog.crewLost = (prog.crewLost ?? 0) + 1;
+          prog.grounded = day + (2 + 3 * rng.next()) * DAYS_PER_YEAR;
+          civ.legitimacy = clamp(civ.legitimacy - 0.1, -1, 1);
+          practise(pad, 'spaceflight', 0.05);
+          Lo.f++; Lo.k += crew.length;
+          w.history.record('DISASTER', day, `The crew of the ${civ.name} capsule ${name} died when their rocket exploded${crew.length ? `: ${crew.map((p) => p.name).join(' and ')}` : ''}.`, this.weight(Lo.first < 0 || prog.crewLost === 1 ? 2 : 1), {
+            persons: crew.map((p) => p.id), civ: civ.id, settlement: pad.id, x: pad.x, y: pad.y,
+            cause: `Crewed spaceflight was still ${Math.round(mS * 100)}% mastered; the programme was grounded until ${Math.floor(prog.grounded / DAYS_PER_YEAR)}.`,
+          });
+          continue;
+        }
+        practise(pad, 'spaceflight', 0.03);
         prog.crewed++;
         if (prog.crewed === 1) {
-          const astro = this.crew(pad, 1)[0];
-          w.history.record('DISCOVERY', day, `${astro ? astro.name : 'An astronaut'} of the ${civ.name} became the first person to orbit the world.`, 3, {
-            persons: astro ? [astro.id] : [], civ: civ.id, settlement: pad.id, x: pad.x, y: pad.y, cause: 'Rockets powerful and reliable enough to carry a person had been built and tested.',
+          const astro = crew[0];
+          const worldFirst = Lo.first < 0;
+          if (worldFirst) { Lo.first = day; Lo.by = astro?.id ?? 0; Lo.at = pad.id; Lo.civ = civ.id; Lo.pre = [Lo.n - 1, Lo.f, Lo.k]; }
+          w.history.record('DISCOVERY', day, worldFirst
+            ? `${astro ? astro.name : 'An astronaut'} of the ${civ.name} became the first person to orbit the world.`
+            : `${astro ? astro.name : 'An astronaut'} became the first of the ${civ.name} to orbit the world.`, this.weight(worldFirst ? 3 : 1), {
+            persons: astro ? [astro.id] : [], civ: civ.id, settlement: pad.id, x: pad.x, y: pad.y,
+            cause: `Rockets powerful and reliable enough to carry a person had been built and tested: ${prog.launches} launches${prog.crewLost ? `, ${prog.crewLost} crew${prog.crewLost > 1 ? 's' : ''} lost on the way` : ''}.`,
           });
-          if (astro) { astro.legend = true; astro.status = clamp(astro.status + 0.4); }
+          if (astro) { astro.legend = worldFirst || astro.legend; astro.status = clamp(astro.status + 0.4); }
         }
         if (prog.crewed >= 3 && !this.satellites.some((s) => s.civ === civ.id && s.kind === 'station')) {
           this.satellites.push({ id: this.next++, civ: civ.id, name: makeWord(NATURAL_PHONOLOGY, rng, 2), kind: 'station', launched: day, altKm: 350 + rng.next() * 150, inc: 0.4 + rng.next() * 0.5, raan: rng.next() * 6.28, phase: rng.next(), until: day + 40 * DAYS_PER_YEAR });
           w.history.record('GROWTH', day, `The ${civ.name} assembled a space station in orbit.`, 2, { civ: civ.id, x: pad.x, y: pad.y, cause: 'Repeated crewed flights made a permanent home in orbit possible.' });
         }
-      } else if (prog.moonLanding < 0 && prog.crewed >= 2 && roll < 0.82 && !this.missions.some((m) => m.civ === civ.id && m.target < 0 && !m.done)) {
+      } else if (prog.moonLanding < 0 && prog.crewed >= 2 && mS >= 0.55 && roll < 0.82 && !this.missions.some((m) => m.civ === civ.id && m.target < 0 && !m.done)) {
         const crew = this.crew(pad, 3);
         const t = 3 + rng.next() * 2;
-        this.missions.push({ id: this.next++, civ: civ.id, name: makeWord(NATURAL_PHONOLOGY, rng, 2), target: -1, crewed: true, crew: crew.map((p) => p.id), launched: day, arrive: day + t, landed: true, done: false });
+        this.missions.push({ id: this.next++, civ: civ.id, name: makeWord(NATURAL_PHONOLOGY, rng, 2), target: -1, crewed: true, crew: crew.map((p) => p.id), launched: day, arrive: day + t, landed: true, done: false, skill: mS });
       } else {
         // a robotic probe to another world: a Hohmann transfer takes half the transfer orbit's period
         const targets = this.bodies.map((_, i) => i).filter((i) => i !== this.home);
@@ -209,7 +266,7 @@ export class Space {
         const b = this.bodies[ti];
         const at = (1 + b.a) / 2;
         const tYears = 0.5 * Math.pow(at, 1.5);
-        this.missions.push({ id: this.next++, civ: civ.id, name: makeWord(NATURAL_PHONOLOGY, rng, 2), target: ti, crewed: false, crew: [], launched: day, arrive: day + tYears * DAYS_PER_YEAR, landed: b.kind !== 'gas' && rng.next() < 0.6, done: false });
+        this.missions.push({ id: this.next++, civ: civ.id, name: makeWord(NATURAL_PHONOLOGY, rng, 2), target: ti, crewed: false, crew: [], launched: day, arrive: day + tYears * DAYS_PER_YEAR, landed: b.kind !== 'gas' && rng.next() < 0.6, done: false, skill: mR });
       }
     }
     // missions arriving
@@ -217,19 +274,40 @@ export class Space {
       if (m.done || m.arrive > day) continue;
       m.done = true;
       const civ = w.civs[m.civ - 1];
+      const prog = this.program(m.civ);
       if (m.target < 0) {
         const crew = m.crew.map((id) => w.people.get(id)!).filter(Boolean);
-        const prog = this.program(m.civ);
-        const first = !w.history.events.some((e) => e.type === 'DISCOVERY' && e.text.includes('landed on the moon'));
+        const Lm = ledgerOf(w, 'moon');
+        Lm.n++;
+        if (rng.next() >= 0.35 + 0.6 * (m.skill ?? 1)) {
+          if (rng.next() < 0.6) {
+            Lm.f++;
+            w.history.record('EXPERIMENT', day, `The crew of the ${m.name} turned back short of the moon after a fault aboard.`, this.weight(1), {
+              persons: crew.map((p) => p.id), civ: m.civ, cause: `Crewed spaceflight was not yet reliable enough for the journey (${Math.round((m.skill ?? 1) * 100)}% mastered).`,
+            });
+          } else {
+            Lm.f++; Lm.k += crew.length;
+            for (const p of crew) w.die(p, 'lost in space');
+            prog.moonFails = (prog.moonFails ?? 0) + 1;
+            prog.grounded = day + (2 + 3 * rng.next()) * DAYS_PER_YEAR;
+            w.history.record('DISASTER', day, `The crew of the ${m.name} were lost on their way to the moon: ${crew.map((p) => p.name).join(', ') || 'all aboard'}.`, this.weight(Lm.first < 0 ? 2 : 1), {
+              persons: crew.map((p) => p.id), civ: m.civ, cause: `A ${(m.arrive - m.launched).toFixed(0)}-day voyage beyond any help; the ${civ?.name ?? 'lost'} programme was grounded.`,
+            });
+          }
+          continue;
+        }
+        const first = Lm.first < 0;
+        if (first) { Lm.first = day; Lm.by = crew[0]?.id ?? 0; Lm.civ = m.civ; Lm.pre = [Lm.n - 1, Lm.f, Lm.k]; }
         if (prog.moonLanding < 0) prog.moonLanding = day;
-        w.history.record('DISCOVERY', day, `${crew.map((p) => p.name).join(', ') || 'A crew'} of the ${civ?.name ?? 'lost'} landed on the moon${first ? ' — the first people to walk on another world' : ''}.`, 3, {
-          persons: crew.map((p) => p.id), civ: m.civ, cause: `A ${(m.arrive - m.launched).toFixed(0)}-day voyage across ${Math.round(MOON.distKm).toLocaleString('en-US')} km, built on ${prog.launches} launches.`,
+        w.history.record('DISCOVERY', day, `${crew.map((p) => p.name).join(', ') || 'A crew'} of the ${civ?.name ?? 'lost'} landed on the moon${first ? ' — the first people to walk on another world' : ''}.`, this.weight(first ? 3 : 2), {
+          persons: crew.map((p) => p.id), civ: m.civ,
+          cause: `A ${(m.arrive - m.launched).toFixed(0)}-day voyage across ${Math.round(MOON.distKm).toLocaleString('en-US')} km, built on ${prog.launches} launches${prog.moonFails ? `; ${prog.moonFails} mission${prog.moonFails > 1 ? 's' : ''} had been lost` : ''}${Lm.k ? `; ${Lm.k} li${Lm.k === 1 ? 'fe' : 'ves'} lost in all` : ''}.`,
         });
         for (const p of crew) { p.legend = true; p.status = clamp(p.status + 0.4); }
         continue;
       }
       const b = this.bodies[m.target];
-      const ok = rng.next() > 0.2;
+      const ok = rng.next() > 0.05 + 0.4 * Math.pow(1 - (m.skill ?? 1), 2);
       w.history.record('DISCOVERY', m.arrive, ok
         ? `The ${civ?.name ?? 'lost'} probe ${m.name} ${m.landed ? 'landed on' : 'reached'} ${b.name}, a ${describe(b)} ${b.a.toFixed(2)} AU from the sun.`
         : `Contact with the probe ${m.name} was lost on approach to ${b.name}.`, ok ? 2 : 1, {
@@ -237,6 +315,25 @@ export class Space {
       });
     }
     this.missions = this.missions.filter((m) => !m.done || day - m.arrive < 30 * DAYS_PER_YEAR);
+  }
+
+  /** Research weights go through the world's throttle (one major research event a decade); 3 is never held back. */
+  private weight(want: number): number {
+    const r = this.world.research;
+    if (want >= 3) { r.lastMajor = this.world.day; return 3; }
+    if (want === 2 && this.world.day - r.lastMajor < 10 * DAYS_PER_YEAR) return 1;
+    if (want === 2) r.lastMajor = this.world.day;
+    return want;
+  }
+
+  private padCrew(s: Settlement, n: number) {
+    const adults = (this.world.residents.get(s.id) ?? []).filter((p) => p.alive && !p.band && p.ageYears(this.world.day) >= 18);
+    const out: Person[] = [];
+    for (let k = 0; k < n * 3 && out.length < n && adults.length; k++) {
+      const p = adults[this.world.rng.int(adults.length)];
+      if (!out.includes(p)) out.push(p);
+    }
+    return out;
   }
 
   private launchSatellite(civ: number, pad: Settlement, prog: CivSpace, rng: Rng) {
@@ -251,9 +348,15 @@ export class Space {
     if (this.satellites.filter((x) => x.civ === civ).length > 80) this.satellites.splice(this.satellites.findIndex((x) => x.civ === civ), 1);
     if (prog.firstSatellite < 0) {
       prog.firstSatellite = w.day;
+      const L = ledgerOf(w, 'satellite');
+      const worldFirst = L.first < 0;
+      if (worldFirst) { L.first = w.day; L.at = pad.id; L.civ = civ; L.pre = [prog.launches - 1, L.f, L.k]; }
       const civName = w.civs[civ - 1]?.name;
-      w.history.record('DISCOVERY', w.day, `The ${civName} put the first artificial satellite, ${s.name}, into orbit.`, 3, {
-        civ, settlement: pad.id, x: pad.x, y: pad.y, cause: `A rocket from ${pad.name} reached orbital speed; at ${Math.round(s.altKm)} km it circles the world every ${Math.round(orbitMinutes(s.altKm))} minutes.`,
+      w.history.record('DISCOVERY', w.day, worldFirst
+        ? `The ${civName} put the first artificial satellite, ${s.name}, into orbit.`
+        : `The ${civName} put their first satellite, ${s.name}, into orbit.`, this.weight(worldFirst ? 3 : 1), {
+        civ, settlement: pad.id, x: pad.x, y: pad.y,
+        cause: `A rocket from ${pad.name} reached orbital speed after ${prog.launches} launch${prog.launches > 1 ? 'es' : ''}, ${prog.failures} of which failed; at ${Math.round(s.altKm)} km it circles the world every ${Math.round(orbitMinutes(s.altKm))} minutes.`,
       });
     }
   }
@@ -279,7 +382,7 @@ export class Space {
     const coastal = (s: Settlement) => { const c = idx(wrapX(Math.floor(s.x)), Math.floor(s.y)); return w.planet.coastDist[c] <= 1 || w.planet.lake[c] === 1; };
     const harbour = w.buildings.count(a.id, 'dock') > 0 || w.buildings.count(b.id, 'dock') > 0;
     if (d > 40 && harbour && coastal(a) && coastal(b) && !key('sea') && this.routes.filter((r) => r.kind === 'sea').length < 400) {
-      const ocean = (a.tech.has('steam') || (a.tech.has('astronomy') && a.tech.has('navigation'))) ? 2 : 1;
+      const ocean = oceanGoing(a) ? 2 : 1;
       const path = seaPath(w, a, b, ocean);
       if (path) {
         let km = 0;

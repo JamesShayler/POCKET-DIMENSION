@@ -8,6 +8,7 @@ import { clamp } from './rng';
 import { distKm, idx, wrapX } from './grid';
 import { DAYS_PER_YEAR, yearOf } from './time';
 import { startMigration } from './society';
+import { shock } from './research';
 
 /** Relations between peoples. Tension is built by causes (crowded borders, hunger, raids, alien customs, ambitious rulers)
  *  and relieved by trade; wars only happen when tension is high and someone expects to win. */
@@ -259,6 +260,7 @@ export class Diplomacy {
       target.food *= 0.4;
       const burned = w.buildings.destroy(target.id, 0.2 + w.random() * 0.25, w.rng);
       if (burned) text += ` ${burned} buildings burned.`;
+      shock(target, 0.9); // workshops and scholars scattered by the sack
       // a beaten, small, or poorly defended place is taken; a strong one is merely sacked
       if (target.pop < 160 || def < atk * 0.5) {
         const old = toCiv;

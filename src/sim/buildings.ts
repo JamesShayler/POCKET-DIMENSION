@@ -23,30 +23,32 @@ export interface BDef {
   size: number; // footprint, km
   tech: TechId[];
   minPop: number;
+  /** how well the arts must be practised before the town can raise it */
+  mastery?: number;
 }
 
 export const BDEFS: Record<BKind, BDef> = {
   hut: { name: 'Hut', cost: { wood: 24 }, labor: 24, cap: 4, size: 0.012, tech: [], minPop: 0 },
   house: { name: 'Timber house', cost: { wood: 90 }, labor: 110, cap: 6, size: 0.016, tech: ['tools'], minPop: 8 },
   brickhouse: { name: 'Mud-brick house', cost: { clay: 60, wood: 30 }, labor: 160, cap: 8, size: 0.017, tech: ['pottery', 'agriculture'], minPop: 20 },
-  stonehouse: { name: 'Stone house', cost: { stone: 130, wood: 40 }, labor: 320, cap: 10, size: 0.02, tech: ['architecture'], minPop: 50 },
+  stonehouse: { name: 'Stone house', cost: { stone: 130, wood: 40 }, labor: 320, cap: 10, size: 0.02, tech: ['architecture'], minPop: 50, mastery: 0.2 },
   granary: { name: 'Granary', cost: { wood: 80, clay: 40 }, labor: 160, cap: 0, size: 0.02, tech: ['pottery', 'agriculture'], minPop: 30 },
   workshop: { name: 'Workshop', cost: { wood: 70, stone: 30 }, labor: 140, cap: 0, size: 0.02, tech: ['tools'], minPop: 25 },
   kiln: { name: 'Kiln', cost: { clay: 60 }, labor: 90, cap: 0, size: 0.014, tech: ['pottery'], minPop: 25 },
   smithy: { name: 'Smithy', cost: { stone: 120, clay: 70, wood: 40 }, labor: 220, cap: 0, size: 0.02, tech: ['metallurgy'], minPop: 50 },
   market: { name: 'Market', cost: { wood: 170 }, labor: 260, cap: 0, size: 0.04, tech: ['tools'], minPop: 120 },
-  temple: { name: 'Temple', cost: { stone: 280, wood: 80 }, labor: 700, cap: 0, size: 0.03, tech: ['architecture'], minPop: 100 },
+  temple: { name: 'Temple', cost: { stone: 280, wood: 80 }, labor: 700, cap: 0, size: 0.03, tech: ['architecture'], minPop: 100, mastery: 0.3 },
   hall: { name: 'Council hall', cost: { wood: 160, stone: 90 }, labor: 380, cap: 0, size: 0.03, tech: ['tools'], minPop: 70 },
-  tower: { name: 'Watchtower', cost: { stone: 170, wood: 50 }, labor: 300, cap: 0, size: 0.012, tech: ['architecture'], minPop: 60 },
+  tower: { name: 'Watchtower', cost: { stone: 170, wood: 50 }, labor: 300, cap: 0, size: 0.012, tech: ['architecture'], minPop: 60, mastery: 0.25 },
   well: { name: 'Well', cost: { stone: 50 }, labor: 80, cap: 0, size: 0.006, tech: ['tools'], minPop: 40 },
   field: { name: 'Field', cost: {}, labor: 150, cap: 0, size: 0.1, tech: ['agriculture'], minPop: 0 },
-  dock: { name: 'Dock', cost: { wood: 100 }, labor: 260, cap: 0, size: 0.03, tech: ['navigation'], minPop: 25 },
+  dock: { name: 'Dock', cost: { wood: 100 }, labor: 260, cap: 0, size: 0.03, tech: ['navigation'], minPop: 25, mastery: 0.2 },
   palisade: { name: 'Palisade', cost: { wood: 260 }, labor: 380, cap: 0, size: 0, tech: ['tools'], minPop: 60 },
-  wall: { name: 'Town wall', cost: { stone: 700, wood: 60 }, labor: 1800, cap: 0, size: 0, tech: ['architecture'], minPop: 140 },
-  factory: { name: 'Factory', cost: { stone: 300, wood: 100, metal: 40 }, labor: 1500, cap: 0, size: 0.06, tech: ['industry'], minPop: 100 },
-  powerplant: { name: 'Power station', cost: { stone: 400, metal: 80 }, labor: 2400, cap: 0, size: 0.07, tech: ['electricity'], minPop: 140 },
-  airport: { name: 'Airport', cost: { stone: 700, metal: 60 }, labor: 4000, cap: 0, size: 0.5, tech: ['flight'], minPop: 160 },
-  launchpad: { name: 'Launch site', cost: { stone: 900, metal: 220 }, labor: 9000, cap: 0, size: 0.25, tech: ['rocketry'], minPop: 180 },
+  wall: { name: 'Town wall', cost: { stone: 700, wood: 60 }, labor: 1800, cap: 0, size: 0, tech: ['architecture'], minPop: 140, mastery: 0.35 },
+  factory: { name: 'Factory', cost: { stone: 300, wood: 100, metal: 40 }, labor: 1500, cap: 0, size: 0.06, tech: ['industry'], minPop: 100, mastery: 0.3 },
+  powerplant: { name: 'Power station', cost: { stone: 400, metal: 80 }, labor: 2400, cap: 0, size: 0.07, tech: ['electricity'], minPop: 140, mastery: 0.3 },
+  airport: { name: 'Airport', cost: { stone: 700, metal: 60 }, labor: 4000, cap: 0, size: 0.5, tech: ['flight'], minPop: 160, mastery: 0.4 },
+  launchpad: { name: 'Launch site', cost: { stone: 900, metal: 220 }, labor: 9000, cap: 0, size: 0.25, tech: ['rocketry'], minPop: 180, mastery: 0.15 },
 };
 /** Ring defences: drawn around the whole town, not placed as a single footprint. */
 export const RINGS: BKind[] = ['palisade', 'wall'];
@@ -278,6 +280,14 @@ export class Buildings {
     }
     this.bySettlement.set(sid, keep);
     return n;
+  }
+
+  /** A building destroyed outright (a fire, an explosion, a collapse): it leaves the town's buildings. */
+  ruin(b: Building) {
+    b.progress = 0;
+    b.done = -2;
+    const arr = this.bySettlement.get(b.sid);
+    if (arr) { const i = arr.indexOf(b); if (i >= 0) arr.splice(i, 1); }
   }
 
   rebuildIndex() {

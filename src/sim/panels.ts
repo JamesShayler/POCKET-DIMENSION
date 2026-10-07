@@ -1,8 +1,9 @@
 import type { World } from './world';
+import type { Settlement } from './settlements';
 import { BIOME_NAMES } from './planet';
 import { NEEDS, PERSONALITY, SKILLS, Person } from './people';
 import { VALUE_KEYS } from './culture';
-import { TECHS, TECH_IDS } from './technology';
+import { STAGE_WORD, TECHS, TECH_IDS, type TechId } from './technology';
 import { clockText, formatYear, yearOf, DAYS_PER_YEAR } from './time';
 import { BDEFS, RES_KEYS } from './buildings';
 import { GROW_DAYS } from './jobs';
@@ -13,7 +14,8 @@ import { describeGrammar, sampleSentences } from './languages';
 import { roleName } from './marine';
 import { AU_KM, MOON, orbitMinutes } from './space';
 import { wallFactor } from './diplomacy';
-import { military } from './techfx';
+import { mastery, military } from './techfx';
+import { attemptChance } from './research';
 
 /**
  * The words and tables of the observer's panels, written where the world lives (the simulation worker), so the interface
@@ -38,6 +40,72 @@ export class Panels {
     const q = this.w.people.get(id);
     return q ? this.link('person', id, q.name) : dim('unknown');
   }
+  /** A town's research: experiments under way (odds and timing of the next attempt), ideas, and work given up or lost. */
+  private research(s: Settlement): string {
+    const w = this.w;
+    const prog = s.prog ?? {};
+    const exp: string[] = [], ideas: string[] = [], shelved: string[] = [];
+    const sname = (id: number) => { const o = w.settlements[id - 1]; return o ? this.link('settlement', o.id, o.name) : 'elsewhere'; };
+    for (const t of TECH_IDS) {
+      const tp = prog[t];
+      if (!tp) continue;
+      const d = TECHS[t];
+      if (tp.st === 2) {
+        const lead = tp.lead ? w.people.get(tp.lead) : undefined;
+        const prev = tp.pl.map((id) => { const q = w.people.get(id); return q ? `${esc(q.name)}${q.alive ? '' : ` †${yearOf(q.death)}`}` : '?'; });
+        let pre = 1;
+        for (const q of d.prereq) pre = Math.min(pre, mastery(s, q));
+        const ps = attemptChance(d, tp.xp, lead && lead.alive ? lead : undefined, 1, pre);
+        const yrs = tp.r > 0 ? Math.max(0, ((tp.by ? 0.075 : 0.15) - tp.w) / tp.r) : Infinity;
+        exp.push(`<div><b>${esc(d.name)}</b> ${dim(`· ${Math.max(1, yearOf(w.day - tp.d))} years of experiments · ${tp.f} failed attempt${tp.f === 1 ? '' : 's'}${tp.k ? ` · ${tp.k} li${tp.k === 1 ? 'fe' : 'ves'} lost` : ''}`)}`
+          + `${lead ? ` · led by ${this.pname(lead.id)}` : ''}${prev.length ? dim(` (after ${prev.join(', ')})`) : ''}`
+          + ` ${dim(`· next attempt ≈ ${Math.round(ps * 100)}%${Number.isFinite(yrs) ? ` in ~${Math.max(1, Math.round(yrs))} year${Math.round(yrs) > 1 ? 's' : ''}` : ''}${tp.bl > 0 ? ' · stalled' : ''}`)}${tp.by ? ` ${dim('· learning from')} ${sname(tp.by)}` : ''}</div>`);
+      } else if (tp.st === 1) {
+        if (tp.why === 'lost') shelved.push(`<div>${esc(d.name)} ${dim(`· lost; remembered (lessons ${Math.round(tp.xp)})`)}</div>`);
+        else if (tp.until > w.day) shelved.push(`<div>${esc(d.name)} ${dim(tp.why === 'deaths' ? `· forbidden after ${tp.k} death${tp.k === 1 ? '' : 's'}; may resume ≈ ${yearOf(tp.until)}` : `· given up; may resume ≈ ${yearOf(tp.until)}`)}</div>`);
+        else ideas.push(`${esc(d.name)}${tp.by ? ` (heard of it from ${sname(tp.by)})` : ''}`);
+      }
+    }
+    return '<h3>Research</h3>' + (exp.join('') || dim('No experiments under way.'))
+      + (ideas.length ? `<div style="color:var(--dim);margin-top:4px">Ideas: ${ideas.join(', ')}</div>` : '')
+      + (shelved.length ? `<div style="margin-top:4px">${shelved.join('')}</div>` : '');
+  }
+
+  /** The almanac's technology page: the world's ledger of firsts and what they cost, and the work under way. */
+  private techAlmanac(): string {
+    const w = this.w;
+    const acts = w.activeSettlements();
+    const Y = DAYS_PER_YEAR;
+    const H3 = (t: string) => `<h3 style="font-size:10px;letter-spacing:.24em;color:var(--dim);text-transform:uppercase;margin-top:18px">${t}</h3>`;
+    const firstOf = (key: TechId | 'satellite' | 'orbit' | 'moon') => {
+      const L = w.research.ledger[key];
+      if (!L || L.first === -1) return dim(L && L.f ? `not yet — ${L.f} failed attempt${L.f === 1 ? '' : 's'} so far${L.k ? `, ${L.k} li${L.k === 1 ? 'fe' : 'ves'} lost` : ''}` : 'not yet');
+      if (L.first === -2) return dim('before records');
+      const who = L.by ? w.people.get(L.by) : undefined;
+      const at = L.at ? w.settlements[L.at - 1] : undefined;
+      return `${formatYear(L.first)}${who ? ' · ' + this.pname(who.id) : ''}${at ? ' · ' + this.link('settlement', at.id, at.name) : ''} ${dim(`after ${L.pre[1]} failure${L.pre[1] === 1 ? '' : 's'}${L.took ? ` over ${Math.max(1, Math.round(L.took / Y))} years` : ''}${L.pre[2] ? ` · ${L.pre[2]} li${L.pre[2] === 1 ? 'fe' : 'ves'} lost` : ''}`)}`;
+    };
+    const rows = TECH_IDS.map((t) => {
+      const d = TECHS[t];
+      const L = w.research.ledger[t];
+      const usable = acts.filter((s) => s.tech.has(t)).length;
+      const mastered = acts.filter((s) => (s.prog?.[t]?.st ?? (s.tech.has(t) ? 5 : 0)) === 5).length;
+      const trying = acts.filter((s) => s.prog?.[t]?.st === 2).length;
+      const mYear = L && L.mastered >= 0 ? formatYear(L.mastered) : L?.mastered === -2 ? 'before records' : '—';
+      return `<tr><td>${esc(d.name)}</td><td style="color:var(--dim)">${d.prereq.map((q) => TECHS[q].name).join(', ') || '—'}</td><td style="color:var(--dim)">${d.civPop ? `a people of ${num(d.civPop)}+` : `a town of ${d.minPop}+`}${d.needs ? ', ' + Object.keys(d.needs).join(', ') : ''}</td><td>${firstOf(t)}</td><td>${mYear}</td><td>${usable} / ${mastered} / ${trying}</td><td>${L && L.lost >= 0 && !usable ? formatYear(L.lost) : '—'}</td></tr>`;
+    }).join('');
+    const feats: [TechId | 'satellite' | 'orbit' | 'moon', string][] = [['seafaring', 'First crossing of the open ocean'], ['flight', 'First powered flight'], ['satellite', 'First artificial satellite'], ['orbit', 'First person in orbit'], ['moon', 'First landing on the moon']];
+    const under: { s: (typeof acts)[number]; t: TechId; frontier: boolean; since: number }[] = [];
+    for (const s of acts) for (const t of TECH_IDS) { const tp = s.prog?.[t]; if (tp?.st === 2) under.push({ s, t, frontier: (w.research.ledger[t]?.first ?? -1) === -1, since: tp.d }); }
+    under.sort((a, b) => (a.frontier === b.frontier ? a.since - b.since : a.frontier ? -1 : 1));
+    const lost = w.history.events.filter((e) => e.type === 'KNOWLEDGE_LOST' && e.weight >= 1).slice(-12).reverse();
+    return `<p style="color:var(--dim)">Every art is earned: an idea, years of experiments that mostly fail (some at a cost in lives), a first success, then generations of practice before it is mastered. Arts that stop being practised can be lost.</p>`
+      + `<table><tr><th>Technology</th><th>Prerequisites</th><th>Needs</th><th>First success</th><th>First mastered</th><th>Usable / mastered / experimenting</th><th>Lost to the world</th></tr>${rows}</table>`
+      + H3('Great achievements') + `<table>${feats.map(([k, label]) => `<tr><td>${label}</td><td>${firstOf(k)}</td></tr>`).join('')}</table>`
+      + H3('Under way') + (under.length ? under.slice(0, 12).map((u) => { const tp = u.s.prog[u.t]!; return `<div>${esc(TECHS[u.t].name)} ${dim('at')} ${this.link('settlement', u.s.id, u.s.name)} ${dim(`· ${Math.max(1, yearOf(w.day - tp.d))} years · ${tp.f} failure${tp.f === 1 ? '' : 's'}${tp.k ? ` · ${tp.k} lives` : ''}${u.frontier ? ' · no one has yet succeeded' : ''}`)}</div>`; }).join('') : dim('No experiments under way.'))
+      + (lost.length ? H3('Lost arts') + lost.map((e) => `<div>${yearOf(e.day)} ${esc(e.text)}</div>`).join('') : '');
+  }
+
   private barRow(label: string, v: number) {
     return `<div class="bar"><span>${label}</span><i><b style="width:${Math.round(Math.max(0, Math.min(1, v)) * 100)}%"></b></i><em>${Math.round(v * 10)}/10</em></div>`;
   }
@@ -197,6 +265,15 @@ export class Panels {
     parts.push(fam.join(''));
     const tree: string[] = [];
     if (p.children.length) { this.descTree(id, '', 3, tree, true); parts.push(`<pre class="tree">${tree.join('\n')}</pre>`); }
+    const leads: string[] = [];
+    if (p.alive && p.home) {
+      const hs = w.settlements[p.home - 1];
+      for (const t of TECH_IDS) {
+        const tp = hs?.prog?.[t];
+        if (tp && tp.lead === p.id && tp.st <= 4) leads.push(`${tp.st === 2 ? 'Leads the experiments with' : 'Leads the work on'} ${esc(TECHS[t].name.toLowerCase())} at ${this.link('settlement', hs.id, hs.name)}: ${Math.max(1, yearOf(w.day - tp.d))} years${tp.f ? `, ${tp.f} failed attempt${tp.f > 1 ? 's' : ''}` : ''}`);
+      }
+    }
+    if (leads.length) parts.push('<h3>Work</h3>' + leads.map((l) => `<div>${l}</div>`).join(''));
     parts.push('<h3>Memories</h3>');
     const mems = [...p.memories].sort((a, b) => b.day - a.day).slice(0, 8);
     parts.push(mems.length ? mems.map((mm) => `<div class="mem"><span class="yr">${yearOf(mm.day).toLocaleString()}</span> <span class="${mm.valence >= 0 ? 'pos' : 'neg'}">${mm.valence >= 0 ? '＋' : '－'}</span> ${esc(mm.text)}${mm.other && w.people.has(mm.other) ? ' · ' + this.pname(mm.other) : ''}</div>`).join('') : dim('Nothing of note yet.'));
@@ -244,7 +321,13 @@ export class Panels {
     parts.push('<h3>Stockpile</h3>' + `<div class="kv"><span>Food</span><span>${num(s.food)}</span>${RES_KEYS.map((k) => `<span>${k}</span><span>${num(s.res[k])}</span>`).join('')}<span>Goods</span><span>${num(s.goods)}</span><span>Wealth</span><span>${num(s.wealth)}</span><span>Tools</span><span>${tools}</span><span>Gathers within</span><span>${s.range.toFixed(0)} km</span>${s.ships >= 0.5 ? `<span>Ships</span><span>${Math.round(s.ships)}</span>` : ''}</div>`);
     parts.push('<h3>Needs</h3>' + (['wood', 'stone', 'clay', 'ore', 'coal'].filter((k) => (s.need[k] ?? 0) > 0.02).map((k) => this.barRow(cap(k), s.need[k])).join('') || dim('Nothing pressing.')));
     parts.push('<h3>Buildings</h3>' + (Object.entries(blds).map(([k, v]) => `<span class="chip on">${v} ${BDEFS[k as keyof typeof BDEFS].name.toLowerCase()}${v > 1 && !k.endsWith('s') ? 's' : ''}</span>`).join('') || dim('Nothing built yet — they sleep in the open.')) + (under ? ` <span class="chip">${under} being built</span>` : '') + `<div style="color:var(--dim)">Housing ${s.housing} for ${s.pop} people${wallFactor(w, s) > 1 ? ` · walls multiply its defenders ×${wallFactor(w, s).toFixed(1)}` : ''}</div>`);
-    parts.push('<h3>Technology</h3>' + ([...s.tech].map((t) => `<span class="chip on">${esc(TECHS[t].name)}</span>`).join('') || dim('None yet.')));
+    parts.push('<h3>Technology</h3>' + (TECH_IDS.filter((t) => s.tech.has(t)).map((t) => {
+      const tp = s.prog?.[t];
+      const st = tp?.st ?? 5;
+      const tip = tp ? `${tp.n ? `${tp.n} attempt${tp.n > 1 ? 's' : ''}, ${tp.f} failed` : 'learned'}${tp.k ? ` · ${tp.k} lives lost` : ''}` : '';
+      return `<span class="chip ${st >= 5 ? 'on' : st === 3 ? 'warn' : ''}" title="${esc(tip)}">${esc(TECHS[t].name)} · ${STAGE_WORD[st]} ${Math.round(mastery(s, t) * 100)}%</span>`;
+    }).join('') || dim('None yet.')));
+    parts.push(this.research(s));
     parts.push('<h3>Occupations</h3>' + Object.entries(s.occupations).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<span class="chip">${esc(k)} ${v}</span>`).join(''));
     if (w.planet.coastDist[ci] <= 1) parts.push(`<h3>Sea</h3><div style="color:var(--dim)">Fishing grounds ${Math.round(w.marine.fishery(s.x, s.y) * 100)}% of their natural richness${s.ships >= 1 ? ` · a fleet of ${Math.round(s.ships)} ship${s.ships >= 1.5 ? 's' : ''}` : ''}</div>`);
     const routes = w.space.routes.filter((r) => r.a === id || r.b === id);
@@ -297,11 +380,18 @@ export class Panels {
       <span>Military</span><span>${warriors} warriors · strength ×${military(capS).toFixed(1)} · defence ${(def * 100).toFixed(0)}${ships >= 1 ? ` · navy of ${Math.round(ships)} ships` : ''}</span><span>Economy</span><span>food ${num(food)} · goods ${num(goods)}</span><span>Founded</span><span>${formatYear(civ.founded)}</span></div>`);
     const vassals = members.filter((s) => s.lord && w.people.get(s.lord)?.alive);
     if (vassals.length) parts.push('<h3>Lords</h3>' + vassals.slice(0, 10).map((s) => `<div>${this.pname(s.lord)} ${dim('of')} ${this.link('settlement', s.id, s.name)} <span class="${s.loyalty > 0.5 ? 'pos' : s.loyalty < 0.25 ? 'neg' : ''}">loyalty ${Math.round(s.loyalty * 100)}%</span></div>`).join(''));
-    parts.push('<h3>Technology</h3>' + ([...techs].map((t) => `<span class="chip on">${esc(TECHS[t as keyof typeof TECHS].name)}</span>`).join('') || dim('None yet.')));
+    parts.push('<h3>Technology</h3>' + (TECH_IDS.filter((t) => techs.has(t)).map((t) => {
+      const best = Math.max(...members.map((m) => mastery(m, t)));
+      const mastered = members.filter((m) => (m.prog?.[t]?.st ?? (m.tech.has(t) ? 5 : 0)) === 5).length;
+      return `<span class="chip ${best >= 0.85 ? 'on' : best < 0.3 ? 'warn' : ''}" title="mastered in ${mastered} of ${members.length} towns">${esc(TECHS[t].name)} ${Math.round(best * 100)}%</span>`;
+    }).join('') || dim('None yet.')));
+    const progs: string[] = [];
+    for (const m of members) for (const t of TECH_IDS) { const tp = m.prog?.[t]; if (tp?.st === 2) progs.push(`<div>${esc(TECHS[t].name)} ${dim('at')} ${this.link('settlement', m.id, m.name)} ${dim(`${tp.f} failure${tp.f === 1 ? '' : 's'} over ${Math.max(1, yearOf(w.day - tp.d))} years${tp.k ? ` · ${tp.k} lives` : ''}`)}</div>`); }
+    if (progs.length) parts.push('<h3>Experiments</h3>' + progs.slice(0, 10).join(''));
     const prog = w.space.programs.get(id);
     if (prog) {
       const sats = w.space.satellites.filter((s) => s.civ === id);
-      parts.push(`<h3>Space program</h3><div class="kv"><span>Launches</span><span>${prog.launches} (${prog.failures} failed)</span><span>In orbit</span><span>${sats.length} ${sats.some((s) => s.kind === 'station') ? '· a space station' : ''}</span><span>First satellite</span><span>${prog.firstSatellite >= 0 ? formatYear(prog.firstSatellite) : '—'}</span><span>Crewed flights</span><span>${prog.crewed}</span><span>Moon landing</span><span>${prog.moonLanding >= 0 && prog.moonLanding <= w.day ? formatYear(prog.moonLanding) : '—'}</span></div>`);
+      parts.push(`<h3>Space program</h3><div class="kv"><span>Launches</span><span>${prog.launches} (${prog.failures} failed)</span><span>In orbit</span><span>${sats.length} ${sats.some((s) => s.kind === 'station') ? '· a space station' : ''}</span><span>First satellite</span><span>${prog.firstSatellite >= 0 ? formatYear(prog.firstSatellite) : '—'}</span><span>Crewed flights</span><span>${prog.crewed}${prog.crewLost ? ` · ${prog.crewLost} crew${prog.crewLost > 1 ? 's' : ''} lost` : ''}${(prog.grounded ?? 0) > w.day ? ` · grounded until ${yearOf(prog.grounded ?? 0)}` : ''}</span><span>Moon landing</span><span>${prog.moonLanding >= 0 && prog.moonLanding <= w.day ? formatYear(prog.moonLanding) : '—'}</span></div>`);
     }
     if (lang) parts.push(`<h3>Language family</h3><pre class="tree">${this.langTree(lang.id)}</pre>`);
     parts.push('<h3>History</h3>' + this.eventList(w.history.query({ civ: id, minWeight: 1, limit: 10 })));
@@ -443,7 +533,7 @@ export class Panels {
     if (tab === 'chronicle') {
       const groups: Record<string, EventType[]> = {
         civilization: ['CIVILIZATION_FOUNDING', 'CIVILIZATION_COLLAPSE', 'FOUNDING', 'SUCCESSION', 'REVOLT', 'GROWTH'],
-        discovery: ['DISCOVERY', 'TECHNOLOGY_DISCOVERY', 'TRADE'],
+        discovery: ['DISCOVERY', 'TECHNOLOGY_DISCOVERY', 'TRADE', 'EXPERIMENT', 'MASTERY', 'KNOWLEDGE_LOST'],
         conflict: ['WAR', 'BATTLE', 'INVASION', 'EXILE'],
         life: ['SPECIATION', 'EXTINCTION', 'AWAKENING'],
         people: ['MIGRATION', 'CULTURAL_SPLIT', 'LANGUAGE_SPLIT', 'MARRIAGE', 'BIRTH', 'DEATH', 'LEGEND'],
@@ -492,15 +582,7 @@ export class Panels {
         <h3 style="font-size:10px;letter-spacing:.24em;color:var(--dim);text-transform:uppercase;margin-top:18px">Life in the sea</h3>
         <table><tr><th>Species</th><th>Kind</th><th>Size</th><th>Water</th><th>Status</th></tr>${sea.map((s) => `<tr><td><a class="l" data-marine="${s.id}">${esc(s.name)}</a></td><td>${roleName(s.role)}</td><td>${s.size.toFixed(1)} m</td><td>${s.tempOpt.toFixed(0)}°C</td><td>${s.extinct >= 0 ? `extinct ${yearOf(s.extinct)}` : 'living'}</td></tr>`).join('')}</table>`;
     } else if (tab === 'technology') {
-      const first = new Map<string, SimEvent>();
-      for (const e of w.history.events) if (e.type === 'TECHNOLOGY_DISCOVERY' && e.weight >= 3) { const t = TECH_IDS.find((tid) => e.text.includes(TECHS[tid].description)); if (t && !first.has(t)) first.set(t, e); }
-      const acts = w.activeSettlements();
-      body = `<table><tr><th>Technology</th><th>Prerequisites</th><th>Needs</th><th>First discovered</th><th>Known in</th></tr>${TECH_IDS.map((t) => {
-        const e = first.get(t);
-        const n = acts.filter((s) => s.tech.has(t)).length;
-        const d = TECHS[t];
-        return `<tr><td>${esc(d.name)}</td><td style="color:var(--dim)">${d.prereq.map((q) => TECHS[q].name).join(', ') || '—'}</td><td style="color:var(--dim)">${d.civPop ? `a people of ${num(d.civPop)}+` : `a town of ${d.minPop}+`}${d.needs ? ', ' + Object.keys(d.needs).join(', ') : ''}</td><td>${e ? `${formatYear(e.day)} · ${esc(e.text.split('\n')[0].split(' of ')[0])}` : dim('not yet')}</td><td>${n} / ${acts.length}</td></tr>`;
-      }).join('')}</table>`;
+      body = this.techAlmanac();
     } else if (tab === 'space') {
       const sp = w.space;
       body = `<h3 style="font-size:10px;letter-spacing:.24em;color:var(--dim);text-transform:uppercase">The solar system</h3><table><tr><th>Body</th><th>Kind</th><th>Orbit</th><th>Year</th><th>Radius</th><th>Moons</th></tr>${sp.bodies.map((b, i) => `<tr><td>${b.home ? '<b>Home</b>' : `<a class="l" data-body="${i}">${esc(b.name)}</a>`}</td><td>${b.home ? 'living world' : b.kind}${b.rings ? ' · rings' : ''}</td><td>${b.a.toFixed(2)} AU</td><td>${Math.pow(b.a, 1.5).toFixed(2)} y</td><td>${num(b.radiusKm)} km</td><td>${b.moons}</td></tr>`).join('')}</table>
@@ -536,7 +618,7 @@ export class Panels {
       ['SEA SPECIES', `${w.marine.species.filter((s) => s.extinct < 0).length} living / ${w.marine.species.length} ever`],
       ['CIVILIZATIONS', `${w.livingCivs().length} living / ${w.civs.length} ever`], ['CITIES (town+)', String(cities)],
       ['SETTLEMENTS', String(sets.length)], ['LANGUAGES', String(w.langs.list.length)], ['CULTURES', String(w.cultures.list.length)],
-      ['TECHNOLOGIES', `${w.techCount()} / ${TECH_IDS.length}`], ['BATTLES', String(c['BATTLE'] ?? 0)],
+      ['TECHNOLOGIES', (() => { let prog = 0, f = 0, k = 0; for (const t of TECH_IDS) { const L = w.research.ledger[t]; if (L) { f += L.f; k += L.k; } } for (const st of w.activeSettlements()) for (const t of TECH_IDS) if (st.prog?.[t]?.st === 2) prog++; return `${w.techCount()} usable / ${TECH_IDS.length} · ${prog} experimenting · ${f} failed attempts · ${k} lives`; })()], ['BATTLES', String(c['BATTLE'] ?? 0)],
       ['DISCOVERIES', String((c['TECHNOLOGY_DISCOVERY'] ?? 0) + (c['DISCOVERY'] ?? 0))], ['ACTIVE EVENTS', `${w.bands.size} bands, ${sets.filter((s) => s.diseaseUntil > w.day).length} epidemics, ${sets.filter((s) => s.stress > 0.6).length} famines, ${w.env.fires.length} fires, ${w.weather.storms.length} storms`],
       ['BUILDINGS', `${w.buildings.list.filter((b) => b.done >= 0 && b.kind !== 'field').length} built, ${w.buildings.list.filter((b) => b.kind === 'field' && b.done >= 0).length} fields`],
       ['DEPLETED NODES', String(w.res.state.size)], ['WARS NOW', String(w.diplomacy.wars().length)], ['TREE SPECIES', String(w.flora.species.length)],

@@ -7,7 +7,8 @@ import { Cultures } from './culture';
 import { Rng, clamp, hashStr } from './rng';
 import { Person, randomPersonality, NP, PERSONALITY, P } from './people';
 import { Civ, Settlement, stageFor } from './settlements';
-import { TechSet } from './technology';
+import type { Research, TechId, TechSet } from './technology';
+import { newResearch, progFromKnow } from './research';
 import { DAYS_PER_SEASON, DAYS_PER_YEAR, yearOf } from './time';
 import { H, N, NBR8, RF, RW, W, distKm, idx, regionOfCell, NR } from './grid';
 import { makeWord } from './names';
@@ -48,6 +49,8 @@ export class World {
   marine: Marine;
   /** how many times two settlements have traded, for the emergence of contact languages */
   tradePairs = new Map<string, number>();
+  /** the world's ledger of firsts in technology and space (who, when, at what cost) */
+  research: Research = newResearch();
   bus = new EventBus();
   history = new History(this.bus);
   langs = new Languages();
@@ -228,7 +231,7 @@ export class World {
   }
 
   // ---------- settlements ----------
-  foundSettlement(o: { x: number; y: number; culture: number; civ?: number; founder?: number; parent?: number; tech: TechSet; nomadic: boolean; note: string; name?: string }): Settlement {
+  foundSettlement(o: { x: number; y: number; culture: number; civ?: number; founder?: number; parent?: number; tech: TechSet; know?: Partial<Record<TechId, number>>; nomadic: boolean; note: string; name?: string }): Settlement {
     const cul = this.cultures.get(o.culture)!;
     const lang = this.langs.get(cul.language)!;
     const s: Settlement = {
@@ -238,7 +241,7 @@ export class World {
       abandoned: -1, tech: new Set(o.tech), food: 20, goods: 0, housing: 0, res: emptyStock(), need: {}, toolTier: 0, wealth: 0, range: 3, scarce: {}, nomadic: o.nomadic, permanent: false, stage: 'camp', pop: 0, peak: 0,
       knownKm: 90, stress: 0, stressSeasons: 0, surplus: 0, produced: 0, consumed: 0, drift: 0, langDrift: 0, disease: 0, diseaseUntil: 0,
       leader: 0, defense: 0, cohesion: 0.5, threat: 0, lastRaid: -99999, occupations: {}, originNote: o.note, yearsSettled: 0,
-      ships: 0, lord: 0, loyalty: 1,
+      ships: 0, lord: 0, loyalty: 1, prog: progFromKnow(o.tech, o.know, this.day),
     };
     this.settlements.push(s);
     if (!s.civ) this.createCiv(s, o.note);

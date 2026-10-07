@@ -70,7 +70,7 @@ export class ObserverView {
     this.entities = new Entities(this.c, this.terrain);
     this.scene.add(this.sky.group, this.terrain.group, this.weather.group, this.entities.group);
     this.c.onEvent.push((e) => {
-      if (e.weight >= 2 && e.x !== undefined && e.y !== undefined) this.ping(e.x, e.y, ['DISASTER', 'BATTLE', 'REVOLT', 'WAR', 'INVASION'].includes(e.type) ? '#ff6b5a' : e.type === 'TECHNOLOGY_DISCOVERY' || e.type === 'DISCOVERY' ? '#9be8ff' : '#ffd27a');
+      if (e.weight >= 2 && e.x !== undefined && e.y !== undefined) this.ping(e.x, e.y, ['DISASTER', 'BATTLE', 'REVOLT', 'WAR', 'INVASION', 'EXPERIMENT', 'KNOWLEDGE_LOST'].includes(e.type) ? '#ff6b5a' : ['TECHNOLOGY_DISCOVERY', 'DISCOVERY', 'MASTERY'].includes(e.type) ? '#9be8ff' : '#ffd27a');
     });
   }
 

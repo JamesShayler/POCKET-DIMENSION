@@ -8,6 +8,7 @@ import { clamp } from './rng';
 import { KM_PER_CELL_Y, distKm, idx, wrapX } from './grid';
 import { WALK_KMH, kmTo, walk } from './behavior';
 import { DAYS_PER_YEAR } from './time';
+import { eff, mastery, techOk } from './techfx';
 
 const has = (s: Settlement, t: string) => (s.tech as Set<string>).has(t);
 
@@ -37,8 +38,9 @@ export function economySeason(w: World, s: Settlement) {
   const day = w.day;
   // --- tools wear out and are replaced
   if (!has(s, 'tools')) s.toolTier = 0;
-  else if (has(s, 'metallurgy') && s.res.metal > 1 && w.buildings.count(s.id, 'smithy') > 0) {
-    s.toolTier = has(s, 'ironworking') && s.res.iron + s.res.metal > 3 ? 3 : 2;
+  else if (mastery(s, 'metallurgy') >= 0.2 && s.res.metal > 1 && w.buildings.count(s.id, 'smithy') > 0) {
+    // metal tools need smiths who can work it reliably, iron more so
+    s.toolTier = mastery(s, 'ironworking') >= 0.3 && s.res.iron + s.res.metal > 3 ? 3 : 2;
     s.res.metal = Math.max(0, s.res.metal - Math.max(0.05, s.pop * 0.002));
   } else s.toolTier = 1;
   // --- everybody burns wood for cooking and warmth
@@ -62,7 +64,7 @@ export function economySeason(w: World, s: Settlement) {
   if (factories) {
     const use = Math.min(s.res.wood * 0.2, factories * 30);
     s.res.wood -= use;
-    s.goods += factories * 25 + use * 1.5;
+    s.goods += (factories * 25 + use * 1.5) * eff(s, 'industry');
     const ci = idx(wrapX(Math.floor(s.x)), Math.floor(s.y));
     w.env.veg[ci] = Math.max(0.05, w.env.veg[ci] - 0.01 * factories);
   }
@@ -121,10 +123,10 @@ function nextProjects(w: World, s: Settlement): { start: BKind[]; shopping: BKin
   const homeless = pop - cap;
   if (homeless > 1) {
     const tiers: BKind[] = ['stonehouse', 'brickhouse', 'house', 'hut'];
-    const ok = tiers.filter((k) => BDEFS[k].tech.every((t) => has(s, t)) && pop >= BDEFS[k].minPop);
+    const ok = tiers.filter((k) => techOk(s, BDEFS[k]) && pop >= BDEFS[k].minPop);
     out.push(...ok);
   }
-  const want = (k: BKind, n: number) => { if (BDEFS[k].tech.every((t) => has(s, t)) && pop >= BDEFS[k].minPop && cnt(k) < n) out.push(k); };
+  const want = (k: BKind, n: number) => { if (techOk(s, BDEFS[k]) && pop >= BDEFS[k].minPop && cnt(k) < n) out.push(k); };
   want('hall', pop >= 70 ? 1 : 0);
   want('well', Math.floor(pop / 160) + (pop >= 40 ? 1 : 0));
   want('workshop', 1 + Math.floor(pop / 160));
@@ -139,7 +141,7 @@ function nextProjects(w: World, s: Settlement): { start: BKind[]; shopping: BKin
   want('tower', s.threat > 0.25 ? 1 + Math.floor(pop / 250) : 0);
   // walls: a palisade first, stone when the town can afford masons
   const raided = s.threat > 0.25 || w.day - s.lastRaid < 4 * DAYS_PER_YEAR;
-  if (raided) { if (has(s, 'architecture') && pop >= BDEFS.wall.minPop) want('wall', 1); else if (!cnt('wall')) want('palisade', 1); }
+  if (raided) { if (techOk(s, BDEFS.wall) && pop >= BDEFS.wall.minPop) want('wall', 1); else if (!cnt('wall')) want('palisade', 1); }
   want('factory', 1 + Math.floor(pop / 400));
   want('powerplant', 1 + Math.floor(pop / 1500));
   want('airport', 1 + Math.floor(pop / 3000));

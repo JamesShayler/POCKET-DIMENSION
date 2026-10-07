@@ -1,3 +1,4 @@
+import { migrateResearch, upgradeV3 } from './research';
 import { World } from './world';
 import { Person, Memory, Relationship } from './people';
 import { Rng } from './rng';
@@ -5,8 +6,11 @@ import type { Band } from './behavior';
 import type { Species, Pop } from './ecology';
 import { N, NR } from './grid';
 
-/** Save format: the seed regenerates the planet (terrain, climate, rivers, resources) exactly; only evolving state is stored. */
-export const SAVE_VERSION = 3;
+/**
+ * Save format: the seed regenerates the planet (terrain, climate, rivers, resources) exactly; only evolving state is stored.
+ * Version 4 adds research records and the ledger of firsts; version-3 saves are upgraded on load.
+ */
+export const SAVE_VERSION = 4;
 
 const b64 = (a: Float32Array | Float64Array | Uint8Array | Uint16Array | Int32Array): string => {
   const bytes = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
@@ -99,13 +103,14 @@ export function serialize(w: World): string {
     discovered: [...w.discoveredComps],
     famineAt: [...w.famineAt], lastMigration: [...w.lastMigration], diseaseAt: [...w.diseaseAt], recentDroughts: w.env.recentDroughts,
     history: { events: w.history.events, nextId: w.history.nextId, counts: w.history.counts },
+    research: w.research,
   };
   return JSON.stringify(data);
 }
 
 export function deserialize(json: string): World {
   const d = JSON.parse(json);
-  if (d.version !== SAVE_VERSION) throw new Error('Incompatible save version ' + d.version);
+  if (d.version !== SAVE_VERSION && d.version !== 3) throw new Error('Incompatible save version ' + d.version);
   const w = new World(d.seedText);
   w.day = d.day; w.seasonAcc = d.seasonAcc; w.awakened = d.awakened; w.firstPermanent = d.firstPermanent;
   w.rng = new Rng(d.rng); w.eco.rng = new Rng(d.ecoRng);
@@ -166,6 +171,9 @@ export function deserialize(json: string): World {
   if (d.marine.sst) { w.marine.sst.set(unb64(d.marine.sst, Float32Array)); w.marine.prod.set(unb64(d.marine.prod, Float32Array)); }
   w.famineAt = new Map(d.famineAt); w.lastMigration = new Map(d.lastMigration); w.diseaseAt = new Map(d.diseaseAt ?? []); w.env.recentDroughts = d.recentDroughts;
   w.history.events = d.history.events; w.history.nextId = d.history.nextId; w.history.counts = d.history.counts;
+  // saves from before research records: every known art counts as long practised, and the ledger is rebuilt
+  if (d.version === 3) upgradeV3(w);
+  w.research = d.research ?? migrateResearch(w);
   return w;
 }
 

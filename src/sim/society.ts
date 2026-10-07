@@ -10,7 +10,8 @@ import { NV, VALUE_KEYS } from './culture';
 import { economySeason } from './economy';
 import { wallFactor } from './diplomacy';
 import { RES_KEYS } from './buildings';
-import { contactRange, governRange, innovationMult, oceanGoing, yieldMult } from './techfx';
+import { governRange, mastery, oceanGoing, yieldMult } from './techfx';
+import { knowOf, practise, researchSeason, shock } from './research';
 
 const TECH_RATE = 0.35;
 const has = (s: Settlement, t: string) => (s.tech as Set<string>).has(t);
@@ -67,6 +68,7 @@ export function settlementSeason(w: World) {
     s.peak = Math.max(s.peak, s.pop);
     if (s.pop === 0) {
       s.abandoned = day;
+      s.prog = {};
       w.history.record('GROWTH', day, `${s.name} was abandoned.`, s.peak > 25 ? 1 : 0, { settlement: s.id, civ: s.civ, x: s.x, y: s.y, cause: 'Its last inhabitants died or left.' });
       continue;
     }
@@ -142,8 +144,8 @@ export function settlementSeason(w: World) {
   }
   const alive = w.activeSettlements();
   for (const s of alive) economySeason(w, s);
-  for (const s of alive) techSeason(w, s);
-  diffuse(w, alive);
+  // ideas, experiments, practice and teaching (src/sim/research.ts)
+  researchSeason(w, alive);
   for (const s of alive) { cultureDrift(w, s, alive); nomadMove(w, s); migrationCheck(w, s); aidNeighbours(w, s, alive); }
   void rng;
 }
@@ -186,116 +188,6 @@ function disease(w: World, s: Settlement) {
 }
 
 // ---------------- technology ----------------
-function techSeason(w: World, s: Settlement) {
-  const adults = adultsOf(w, s.id);
-  if (adults.length < 3) return;
-  const cul = w.cultures.get(s.culture)!;
-  // local resources within reach
-  const cx = Math.floor(s.x);
-  const cy = Math.floor(s.y);
-  const res = { stone: 0, clay: 0, copper: 0, iron: 0, coal: 0, coast: 0, fert: 0, wood: 0 };
-  for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
-    const y = cy + dy;
-    if (y < 0 || y >= H) continue;
-    const i = idx(wrapX(cx + dx), y);
-    if (w.planet.ocean[i]) { res.coast = 1; continue; }
-    res.stone = Math.max(res.stone, w.planet.res.stone[i] / 255);
-    res.clay = Math.max(res.clay, w.planet.res.clay[i] / 255);
-    res.copper = Math.max(res.copper, w.planet.res.copper[i] / 255);
-    res.iron = Math.max(res.iron, w.planet.res.iron[i] / 255);
-    res.coal = Math.max(res.coal, w.planet.res.coal[i] / 255);
-    res.fert = Math.max(res.fert, w.env.fert[i]);
-    res.wood = Math.max(res.wood, w.env.veg[i]);
-  }
-  let innov = 0;
-  let scholars = 0;
-  for (const p of adults) {
-    const v = p.personality[P.creativity] * 0.6 + p.personality[P.curiosity] * 0.2 + p.personality[P.intelligence] * 0.2;
-    innov += v * v;
-    if (p.occupation === 'scholar') scholars++;
-  }
-  innov *= (1 + scholars * 1.5) * (0.6 + 0.8 * cul.values[0]) * (has(s, 'writing') ? 1.3 : 1) * innovationMult(s);
-  const civPop = w.civs[s.civ - 1]?.pop ?? s.pop;
-  for (const id of TECH_IDS) {
-    if (s.tech.has(id)) continue;
-    const t = TECHS[id];
-    // an idea needs a big enough town, or a people large enough to keep it alive between its villages
-    if ((s.pop < t.minPop && (s.pop < t.minPop * 0.35 || civPop < t.minPop * 2.5)) || (t.civPop && civPop < t.civPop)) continue;
-    if (!t.prereq.every((q) => s.tech.has(q))) continue;
-    let ok = true;
-    if (t.needs) for (const k of Object.keys(t.needs) as (keyof typeof res)[]) if (res[k] < (t.needs[k] ?? 0)) ok = false;
-    if (!ok) continue;
-    let pressure = 1;
-    if (id === 'agriculture') pressure += 2 * s.stress + (s.nomadic ? 0 : 0.5);
-    if (id === 'metallurgy') pressure += s.goods / Math.max(10, s.pop);
-    if (id === 'navigation') pressure += 0.5;
-    const rate = (TECH_RATE * Math.sqrt(innov) * pressure) / t.difficulty; // per year
-    if (w.rng.next() < 1 - Math.exp(-rate / 4)) discover(w, s, id as TechId, adults);
-  }
-}
-
-function discover(w: World, s: Settlement, id: TechId, adults: Person[]) {
-  const def = TECHS[id];
-  let best = adults[0];
-  let bs = -1;
-  for (const p of adults) {
-    const sc = p.personality[P.creativity] * 0.6 + p.personality[P.curiosity] * 0.2 + p.personality[P.intelligence] * 0.2 + w.rng.next() * 0.25;
-    if (sc > bs) { bs = sc; best = p; }
-  }
-  s.tech.add(id);
-  const cul = w.cultures.get(s.culture)!;
-  const civ = w.civs[s.civ - 1];
-  const everBefore = w.settlements.some((o) => o !== s && o.tech.has(id));
-  best.remember({ day: w.day, kind: 'discovery', text: `Discovered ${def.name.toLowerCase()}`, valence: 0.9, intensity: 0.95, x: s.x, y: s.y });
-  best.reputation = clamp(best.reputation + 0.4);
-  best.status = clamp(best.status + 0.25);
-  if (!everBefore && def.difficulty >= 100) best.legend = true;
-  const text = `${best.name} of the ${cul.name} civilization has discovered ${def.description}.`;
-  w.history.record('TECHNOLOGY_DISCOVERY', w.day, text + '\n' + def.impact.join('\n'), everBefore ? 1 : 3, {
-    persons: [best.id], settlement: s.id, civ: civ?.id, culture: s.culture, x: s.x, y: s.y,
-    cause: `A settlement of ${s.pop} people with ${Object.keys(def.needs ?? {}).length ? 'suitable local resources' : 'enough curiosity'} and prerequisites (${def.prereq.join(', ') || 'none'}) made the idea possible.`,
-  });
-  if (id === 'writing' || id === 'mathematics' || id === 'engineering') {
-    const lang = w.langs.get(cul.language);
-    if (lang) lang.writing = id === 'writing' ? 'pictographic' : id === 'mathematics' ? 'syllabic' : 'alphabetic';
-  }
-}
-
-function diffuse(w: World, living: Settlement[]) {
-  const n = living.length;
-  if (n < 2) return;
-  const step = n > 300 ? 3 : 1;
-  for (let a = 0; a < n; a += 1) {
-    const A = living[a];
-    for (let b = a + 1; b < n; b += step) {
-      const B = living[b];
-      const d = distKm(A.x, A.y, B.x, B.y);
-      // ideas travel as far as the better-connected of the two can reach; within one polity they always circulate
-      const range = A.civ === B.civ ? Math.max(400, contactRange(A), contactRange(B)) : Math.max(contactRange(A), contactRange(B));
-      if (d > range) continue;
-      const cA = w.cultures.get(A.culture)!;
-      const cB = w.cultures.get(B.culture)!;
-      const contact = (1 - d / range) * (0.5 + 0.25 * (cA.values[5] + cB.values[5])) * (A.culture === B.culture ? 1 : 0.55) * (A.civ === B.civ ? 2 : 1)
-        * (w.tradePairs.has(A.id < B.id ? `${A.id}:${B.id}` : `${B.id}:${A.id}`) ? 1.8 : 1);
-      for (const [from, to, tc] of [[A, B, cB], [B, A, cA]] as [Settlement, Settlement, typeof cA][]) {
-        for (const id of from.tech) {
-          if (to.tech.has(id)) continue;
-          const def = TECHS[id];
-          if (!def.prereq.every((q) => to.tech.has(q)) || to.pop < def.minPop * 0.5) continue;
-          const p = 1 - Math.exp(-0.18 * contact * (0.3 + tc.values[0]));
-          if (w.rng.next() < p) {
-            to.tech.add(id);
-            if (def.id === 'agriculture' && to.nomadic) to.yearsSettled = Math.max(to.yearsSettled, 1);
-            w.history.record('TRADE', w.day, `${to.name} learned ${def.name.toLowerCase()} from ${from.name}.`, def.difficulty > 100 ? 1 : 0, {
-              settlement: to.id, civ: to.civ, x: to.x, y: to.y, cause: `Contact between neighbouring settlements (${Math.round(d)} km apart).`,
-            });
-          }
-        }
-      }
-    }
-  }
-}
-
 // ---------------- culture & language drift ----------------
 function cultureDrift(w: World, s: Settlement, living: Settlement[]) {
   const cul = w.cultures.get(s.culture)!;
@@ -417,8 +309,24 @@ export function startMigration(w: World, s: Settlement, reason: string) {
   if (!site) site = findSite(w, s.x, s.y, Math.max(radius * 1.6, 350), has(s, 'navigation'), reachComp, s.culture, 40, 0);
   if (!site) return;
   const members = [...group];
+  // an ocean crossing is a gamble until the sea has been mastered: whole fleets were lost
+  const sc = idx(wrapX(Math.floor(site.x)), Math.max(0, Math.min(H - 1, Math.floor(site.y))));
+  if (reachComp === ANY_COMP && w.landCompBoat[sc] !== w.landCompBoat[cellOf(seed)]) {
+    const m = Math.max(mastery(s, 'seafaring'), mastery(s, 'steam'));
+    const pLost = 0.02 + 0.45 * (1 - m) * (1 - m);
+    if (rng.next() < pLost) {
+      for (const p of members) w.die(p, 'lost at sea');
+      s.ships = Math.max(0, s.ships - 1);
+      practise(s, 'seafaring', 0.03);
+      w.history.record('EXPERIMENT', w.day, `${seed.name} led ${members.length} people from ${s.name} out across the open ocean; they were never seen again.`, members.length >= 15 ? 2 : 1, {
+        persons: [seed.id], settlement: s.id, civ: s.civ, culture: s.culture, x: s.x, y: s.y,
+        cause: `Their ships and pilots were not yet equal to the open sea (seafaring ${Math.round(mastery(s, 'seafaring') * 100)}% mastered).`,
+      });
+      return;
+    }
+  }
   const band: Band = {
-    id: w.nextBand++, kind: 'migrants', leader: seed.id, tx: site.x, ty: site.y, from: s.id, culture: s.culture, civ: s.civ, tech: new Set(s.tech),
+    id: w.nextBand++, kind: 'migrants', leader: seed.id, tx: site.x, ty: site.y, from: s.id, culture: s.culture, civ: s.civ, tech: new Set(s.tech), know: knowOf(s),
     note: reason, created: w.day, members: members.map((m) => m.id), stuck: 0, lastRaid: -1e9,
   };
   w.bands.set(band.id, band);
@@ -514,7 +422,7 @@ export function arriveBand(w: World, b: Band) {
   }
   const nomadic = !b.tech.has('agriculture');
   const s = w.foundSettlement({
-    ...(w.planet.landNear(Math.floor(site.x) + 0.5, Math.floor(site.y) + 0.5) ?? { x: Math.floor(site.x) + 0.5, y: Math.floor(site.y) + 0.5 }), culture, civ: civId || undefined, founder: leader.id, parent: from?.id, tech: b.tech, nomadic, note, name,
+    ...(w.planet.landNear(Math.floor(site.x) + 0.5, Math.floor(site.y) + 0.5) ?? { x: Math.floor(site.x) + 0.5, y: Math.floor(site.y) + 0.5 }), culture, civ: civId || undefined, founder: leader.id, parent: from?.id, tech: b.tech, know: b.know, nomadic, note, name,
   });
   s.knownKm = from ? Math.max(90, from.knownKm * 0.6) : 90;
   if (!civId) {
@@ -713,7 +621,7 @@ function makeOutcast(w: World, s: Settlement, p: Person, adults: Person[], alien
   for (const g of group) for (const cid of g.children) { const c = w.people.get(cid); if (c && c.alive && c.ageYears(w.day) < 12 && c.home === s.id && !withKids.includes(c)) { withKids.push(c); c.home = 0; } }
   const bandKind: Band['kind'] = kind === 'raider' ? 'raiders' : 'outcasts';
   const band: Band = {
-    id: w.nextBand++, kind: bandKind, leader: p.id, tx: p.x, ty: p.y, from: s.id, culture: s.culture, civ: 0, tech: new Set(s.tech),
+    id: w.nextBand++, kind: bandKind, leader: p.id, tx: p.x, ty: p.y, from: s.id, culture: s.culture, civ: 0, tech: new Set(s.tech), know: knowOf(s),
     note: verb[reasonKey], created: w.day, members: withKids.map((m) => m.id), stuck: 0, lastRaid: -1e9,
   };
   for (const m of withKids) { m.band = band.id; m.food += 5; m.hasTarget = false; }
@@ -899,8 +807,9 @@ function collapse(w: World, civ: Civ, members: Settlement[]) {
     groups.push(g);
   }
   w.history.record('CIVILIZATION_COLLAPSE', w.day, `The ${civ.name} collapsed, breaking into ${groups.length} successor${groups.length > 1 ? ' states' : ''}.`, 3, {
-    civ: civ.id, culture: civ.culture, x: members[0].x, y: members[0].y, cause: 'Prolonged hardship destroyed the legitimacy that held its settlements together.',
+    civ: civ.id, culture: civ.culture, x: members[0].x, y: members[0].y, cause: 'Prolonged hardship destroyed the legitimacy that held its settlements together. Scholars scattered and workshops fell idle.',
   });
+  for (const m of members) shock(m, 0.85);
   for (const g of groups) {
     const c = w.createCiv(g[0], 'Emerged from the ruins of the ' + civ.name + '.', civ.id);
     for (const o of g.slice(1)) { o.civ = c.id; c.members.push(o.id); }

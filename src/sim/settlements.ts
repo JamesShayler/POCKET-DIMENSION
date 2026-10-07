@@ -1,4 +1,4 @@
-import type { TechSet } from './technology';
+import type { TechId, TechProgress, TechSet } from './technology';
 import type { Stock } from './buildings';
 
 export type Stage = 'camp' | 'settlement' | 'village' | 'town' | 'city';
@@ -24,6 +24,8 @@ export interface Settlement {
   res: Stock;
   /** what the community currently lacks (0..1), drives who works at what */
   need: Record<string, number>;
+  /** this town's work on each art: ideas, experiments, mastery (see research.ts) */
+  prog: Partial<Record<TechId, TechProgress>>;
   /** materials set aside for the great work the town is saving toward (kept out of trade, crafts and lesser projects) */
   reserve?: Partial<Record<string, number>>;
   toolTier: number; // 0 bare hands, 1 stone, 2 bronze/copper, 3 iron

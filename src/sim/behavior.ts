@@ -3,7 +3,7 @@ import { clamp, lerp } from './rng';
 import { H, W, KM_PER_CELL_Y, NBR8, distKm, idx, kmPerCellX, regionOfCell, wrapDx, wrapX } from './grid';
 import { Goal, ND, NS, Occupation, P, Person, SK } from './people';
 import type { Settlement } from './settlements';
-import type { TechSet } from './technology';
+import type { TechId, TechSet } from './technology';
 import { DAYS_PER_YEAR, seasonOf } from './time';
 import { NV } from './culture';
 import { runJob } from './jobs';
@@ -20,6 +20,8 @@ export interface Band {
   culture: number;
   civ: number;
   tech: TechSet;
+  /** how well the group knew each art when it left (mastery 0..1), passed to the town it founds */
+  know?: Partial<Record<TechId, number>>;
   note: string;
   created: number;
   members: number[];
