@@ -444,6 +444,13 @@ export class Entities {
       }
     }
     // ---- forests from the terrain lattice, thinned by what the simulation says is growing there
+    // towns clear the land around them for firewood, timber and pasture; the woods thin out for a while beyond
+    const towns: { p: [number, number, number]; r: number }[] = [];
+    for (const st of c.settlements) {
+      const sp = this.ground(st.x, st.y, 0, [0, 0, 0]);
+      if (this.kmTo(sp, target) > 8) continue;
+      towns.push({ p: sp, r: (extent.get(st.id) ?? 0.03) + 0.04 + Math.sqrt(Math.max(0, st.pop)) * 0.006 });
+    }
     const clearHash = new SpatialHash<{ p: [number, number, number]; r: number }>(0.12);
     for (const g of clear) clearHash.add(g.p, g.r, g);
     const groveHash = new SpatialHash<{ p: [number, number, number]; r: number; frac: number }>(0.6);
@@ -469,6 +476,11 @@ export class Entities {
         // is the forest still standing here? (trees outlast winter; farmland and felled groves do not keep them)
         if (env && env.cultivated[cell] && ((hv * 5.3) % 1) > 0.25) continue;
         let skip = false;
+        for (const tw of towns) {
+          const dt = Math.hypot(tw.p[0] - px, tw.p[1] - py, tw.p[2] - pz);
+          if (dt < tw.r || (dt < tw.r * 2.2 && ((hv * 11.7) % 1) > (dt - tw.r) / (tw.r * 1.2))) { skip = true; break; }
+        }
+        if (skip) continue;
         for (const g of clearHash.near(px, py, pz)) { if (Math.hypot(g.p[0] - px, g.p[1] - py, g.p[2] - pz) < g.r) { skip = true; break; } }
         if (skip) continue;
         for (const g of groveHash.near(px, py, pz)) {
