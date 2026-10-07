@@ -494,8 +494,10 @@ export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine:
           if (units > 0.01) { s.res.clay -= units * 2; s.res.wood -= Math.min(s.res.wood, units * 0.5); s.goods += units; made = units; }
         } else {
           const rateMul = b ? 1 : 0.4;
-          const units = Math.min(hours / 2 * sk * rateMul, s.res.wood, s.res.stone / 0.5 + 99);
-          if (units > 0.01) { s.res.wood -= units; s.res.stone -= Math.min(s.res.stone, units * 0.5); s.goods += units; made = units; }
+          // crafts use only what is not set aside for a great work
+          const woodFree = Math.max(0, s.res.wood - (s.reserve?.wood ?? 0)), stoneFree = Math.max(0, s.res.stone - (s.reserve?.stone ?? 0));
+          const units = Math.min(hours / 2 * sk * rateMul, woodFree, stoneFree / 0.5 + 99);
+          if (units > 0.01) { s.res.wood -= units; s.res.stone -= Math.min(stoneFree, units * 0.5); s.goods += units; made = units; }
         }
         p.skills[SK.crafting] = Math.min(1, p.skills[SK.crafting] + hours * 0.0004);
         if (made <= 0.01) { s.scarce['craft'] = w.day; p.task = ''; p.phase = 0; hours = 0; } else hours = 0;

@@ -88,6 +88,8 @@ export function economySeason(w: World, s: Settlement) {
   const pop = Math.max(1, s.pop);
   let pending: Partial<Record<ResKey, number>> = {};
   const plan = nextProjects(w, s);
+  const greatWork = plan.start.find((k) => GREAT_WORKS.includes(k));
+  s.reserve = greatWork ? { ...BDEFS[greatWork].cost } : undefined;
   for (const k of plan.shopping) for (const rk of Object.keys(BDEFS[k].cost) as ResKey[]) pending[rk] = (pending[rk] ?? 0) + (BDEFS[k].cost[rk] ?? 0);
   for (const b of w.buildings.of(s.id)) if (b.done < 0 && b.progress < 1) { /* materials were reserved at the start */ }
   const target = (k: ResKey, per: number) => per * pop + 12 + (pending[k] ?? 0) * 1.1;
@@ -164,7 +166,7 @@ function startProjects(w: World, s: Settlement, plan: { start: BKind[] }) {
   // while saving for a great work, its materials are set aside: other projects may only use what lies beyond the
   // reserve (essentials excepted), so houses go up in timber or brick rather than eating the stone for a wall or a pad
   const great = plan.start.find((k) => GREAT_WORKS.includes(k));
-  const reserve: Partial<Record<ResKey, number>> = great ? BDEFS[great].cost : {};
+  const reserve: Partial<Record<string, number>> = s.reserve ?? {};
   for (const k of plan.start) {
     if (started >= slots) break;
     const isHome = HOUSING.includes(k);
@@ -279,7 +281,8 @@ function planTrade(w: World, s: Settlement) {
     if (w.landComp[idx(wrapX(Math.floor(o.x)), Math.floor(o.y))] !== comp && !(has(s, 'navigation') && w.landCompBoat[idx(wrapX(Math.floor(o.x)), Math.floor(o.y))] === w.landCompBoat[idx(wrapX(Math.floor(s.x)), Math.floor(s.y))])) continue;
     if (w.diplomacy.atWar(s.civ, o.civ)) continue;
     for (const give of keys) {
-      const surplus = stockOf(s, give) - 1.4 * (WANT[give] ?? 0.5) * s.pop - 6;
+      // what is set aside for a great work is not for sale
+      const surplus = stockOf(s, give) - 1.4 * (WANT[give] ?? 0.5) * s.pop - 6 - (s.reserve?.[give] ?? 0);
       if (surplus < 4) continue;
       for (const get of [...keys, 'gold']) {
         if (get === give) continue;
