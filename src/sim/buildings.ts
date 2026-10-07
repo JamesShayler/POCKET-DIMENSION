@@ -71,13 +71,16 @@ export interface Building {
   residents: number;
 }
 
+/** A point just inland of the waterline around a town: where it is, which way the water lies, and how far out (km). */
+interface ShorePoint { x: number; y: number; rot: number; r: number }
+
 export class Buildings {
   list: Building[] = [];
   /** per settlement: its buildings (a cached array, never copy it in hot paths) */
   bySettlement = new Map<number, Building[]>();
   private static EMPTY: Building[] = [];
   /** shoreline points around a town, a pure function of its position (so caching it never changes the history) */
-  private shoreMemo = new Map<string, { x: number; y: number }[]>();
+  private shoreMemo = new Map<string, ShorePoint[]>();
 
   constructor(private world: World) {}
 
@@ -110,13 +113,18 @@ export class Buildings {
     const n = mine.length;
     if (RINGS.includes(kind)) return { x: s.x, y: s.y };
     if (kind === 'dock') {
-      // a dock stands on the town's own shore, just inland of the waterline
+      // a dock stands on the town's own nearest shore, just inland of the waterline, its pier reaching out over the water
       const pts = this.shore(s);
-      const k0 = rng.int(Math.max(1, pts.length));
-      for (let q = 0; q < pts.length; q++) {
-        const c = pts[(k0 + q) % pts.length];
-        if (mine.some((b) => Math.hypot(wrapDx(c.x, b.x) * kmPerCellX(c.y), (c.y - b.y) * KM_PER_CELL_Y) < (def.size + BDEFS[b.kind].size) * 1.15 + 0.004)) continue;
-        return { x: ((c.x % W) + W) % W, y: c.y };
+      if (!pts.length) return null;
+      const rMin = Math.min(...pts.map((c) => c.r));
+      const near = pts.filter((c) => c.r <= Math.max(rMin * 1.5, rMin + 1));
+      for (const list of [near, pts]) {
+        const k0 = rng.int(list.length);
+        for (let q = 0; q < list.length; q++) {
+          const c = list[(k0 + q) % list.length];
+          if (mine.some((b) => Math.hypot(wrapDx(c.x, b.x) * kmPerCellX(c.y), (c.y - b.y) * KM_PER_CELL_Y) < (def.size + BDEFS[b.kind].size) * 1.15 + 0.004)) continue;
+          return { x: ((c.x % W) + W) % W, y: c.y, rot: c.rot };
+        }
       }
       return null;
     }
@@ -135,7 +143,7 @@ export class Buildings {
           const x = f.x + (lx * cr - ly * sr) / kmPerCellX(y);
           const cell = idx(wrapX(Math.floor(x)), Math.floor(y));
           if (p.ocean[cell] || w.env.fert[cell] < 0.12 || !p.isLand(x, y, 0.004)) continue;
-          if (!this.fieldFits(mine, x, y)) continue;
+          if (!this.fieldFits(mine, x, y, f.rot)) continue;
           return { x: ((x % W) + W) % W, y, rot: f.rot };
         }
       }
@@ -166,18 +174,36 @@ export class Buildings {
     return null;
   }
 
-  /** A field may touch other fields edge to edge, but keeps clear of everything else. */
-  private fieldFits(mine: Building[], x: number, y: number): boolean {
+  /**
+   * A field may touch another field edge to edge when it is laid square to it (same rotation); a field at any other
+   * angle keeps a full diagonal away (squares can overlap up to size·√2 apart), and every field keeps clear of buildings.
+   * `rot` is the new field's rotation, or undefined if it will be chosen later (then it may be at any angle).
+   */
+  private fieldFits(mine: Building[], x: number, y: number, rot?: number): boolean {
     const size = BDEFS.field.size, kx = kmPerCellX(y);
     for (const b of mine) {
-      const d = Math.hypot(wrapDx(x, b.x) * kx, (y - b.y) * KM_PER_CELL_Y);
-      if (d < (b.kind === 'field' ? size * 0.97 : size * 0.5 + BDEFS[b.kind].size + 0.004)) return false;
+      const dx = wrapDx(x, b.x) * kx, dy = (y - b.y) * KM_PER_CELL_Y;
+      if (b.kind !== 'field') {
+        if (Math.hypot(dx, dy) < size * 0.5 + BDEFS[b.kind].size + 0.004) return false;
+        continue;
+      }
+      if (rot !== undefined && Math.abs(rot - b.rot) < 1e-6) {
+        // in the other field's own frame (the same convention the patchwork step uses)
+        const c = Math.cos(b.rot), sn = Math.sin(b.rot);
+        const u = dx * c + dy * sn, v = -dx * sn + dy * c;
+        if (Math.max(Math.abs(u), Math.abs(v)) < size * 0.97) return false;
+      } else if (Math.hypot(dx, dy) < size * Math.SQRT2 + 0.004) return false;
     }
     return true;
   }
 
+  /** Whether the town has any water within reach of a harbour (pure in its position, like `shore`). */
+  hasShore(s: Settlement): boolean {
+    return this.shore(s).length > 0;
+  }
+
   /** Where the water begins around a town: along 24 bearings, the first sea or lake within 24 km, found to a few metres. */
-  private shore(s: Settlement): { x: number; y: number }[] {
+  private shore(s: Settlement): ShorePoint[] {
     const key = `${s.id}:${s.x}:${s.y}`;
     const hit = this.shoreMemo.get(key);
     if (hit) return hit;
@@ -186,7 +212,7 @@ export class Buildings {
       const y = s.y + (sa * r) / KM_PER_CELL_Y;
       return { x: s.x + (ca * r) / kmPerCellX(y), y };
     };
-    const out: { x: number; y: number }[] = [];
+    const out: ShorePoint[] = [];
     for (let k = 0; k < 24; k++) {
       const ang = (k / 24) * Math.PI * 2 + 0.1;
       const ca = Math.cos(ang), sa = Math.sin(ang);
@@ -203,7 +229,9 @@ export class Buildings {
         if (p.isLand(q.x, q.y, 0.0)) lo = m; else hi = m;
       }
       const q = at(ca, sa, Math.max(0.03, lo - 0.012));
-      if (p.isLand(q.x, q.y, 0.0)) out.push(q);
+      // facing the water: the renderer's heading turns local +z toward north·cos + east·sin, the pier runs along −z,
+      // and the simulation's y grows southward, so the pier points down this bearing when rot = ang − π/2
+      if (p.isLand(q.x, q.y, 0.0)) out.push({ x: q.x, y: q.y, rot: ang - Math.PI / 2, r: lo });
     }
     this.shoreMemo.set(key, out);
     return out;

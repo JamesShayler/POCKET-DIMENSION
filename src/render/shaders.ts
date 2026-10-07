@@ -23,6 +23,9 @@ const float PR = 1000.0;
 const float AR = 1100.0;
 const vec3 KR = vec3(5.8e-3, 13.5e-3, 33.1e-3);
 const float KM = 21e-3;
+// ozone absorbs orange and yellow (the Chappuis band) and keeps the twilight sky blue; taken here in proportion to the
+// air column (Earth's ozone column is about 15 km at peak density against an 8 km Rayleigh scale height)
+const vec3 KO = vec3(0.65e-3, 1.881e-3, 0.085e-3) * 1.9;
 const float HR = 8.0;
 const float HM = 1.2;
 vec2 rsi(vec3 r0, vec3 rd, float sr){
@@ -55,7 +58,8 @@ vec3 scatter(vec3 r0, vec3 rd, float tMax, vec3 sunDir, float sunI, out vec3 tra
     // light reaching this point from the sun: the planet's shadow, softened over the terminator
     vec2 ps = rsi(x, sunDir, AR);
     float tc = dot(x, sunDir);
-    float sh = tc < 0.0 ? smoothstep(PR - 2.0, PR + 14.0, length(x - sunDir * tc)) : 1.0;
+    // (the soft band lies inside the geometric shadow, so the light is continuous across the terminator plane)
+    float sh = tc < 0.0 ? smoothstep(PR - 16.0, PR, length(x - sunDir * tc)) : 1.0;
     if (sh <= 0.0) continue;
     float dsl = ps.y / float(M);
     float lR = 0.0, lM = 0.0;
@@ -64,10 +68,10 @@ vec3 scatter(vec3 r0, vec3 rd, float tMax, vec3 sunDir, float sunI, out vec3 tra
       float hl = max(0.0, length(y) - PR);
       lR += exp(-hl/HR)*dsl; lM += exp(-hl/HM)*dsl;
     }
-    vec3 att = exp(-(KR*(odR+lR) + KM*1.1*(odM+lM)));
+    vec3 att = exp(-((KR + KO)*(odR+lR) + KM*1.1*(odM+lM)));
     tR += dR*att*sh; tM += dM*att*sh;
   }
-  trans = exp(-(KR*odR + KM*1.1*odM));
+  trans = exp(-((KR + KO)*odR + KM*1.1*odM));
   return sunI * (pR*KR*tR + pM*KM*tM);
 }
 `;

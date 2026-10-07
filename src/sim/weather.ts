@@ -106,11 +106,14 @@ export class Weather {
       this.climT[k] = t / n;
       this.ampT[k] = a / n;
     }
-    // start from climate
+    // start from climate: moist marine air, drier air inland, and the cloud such air carries (a dry start would leave
+    // the sky empty for days of living time while evaporation caught up)
     for (let k = 0; k < WN; k++) {
       this.T[k] = this.climT[k];
       this.sst[k] = this.climT[k];
-      this.q[k] = 0.4 * this.qsat(this.T[k]);
+      const rh = 0.72 - 0.22 * this.land[k];
+      this.q[k] = rh * this.qsat(this.T[k]);
+      this.cloud[k] = Math.max(0, Math.min(1, (rh - 0.45) * 1.7));
     }
     this.computeCurrents(0);
     this.carried = [this.T, this.q, this.cloud];

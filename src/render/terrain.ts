@@ -162,6 +162,7 @@ export class Terrain {
     this.drawn = [];
     const camR = Math.hypot(cam[0], cam[1], cam[2]);
     const camAlt = camR - R_KM;
+    const coarseSplit = SPLIT + (7 - SPLIT) * Math.max(0, Math.min(1, (camAlt - 150) / 300));
     const camDir: [number, number, number] = [cam[0] / camR, cam[1] / camR, cam[2] / camR];
     const horizon = Math.acos(Math.min(1, (R_KM - 8) / Math.max(R_KM, camR)));
     const visit = (n: Node): boolean => {
@@ -172,8 +173,10 @@ export class Terrain {
       const ch = n.mesh ? (n.minH + n.maxH) / 2 : 0;
       const cx = n.dir[0] * (R_KM + ch) - cam[0], cy = n.dir[1] * (R_KM + ch) - cam[1], cz = n.dir[2] * (R_KM + ch) - cam[2];
       const d = Math.hypot(cx, cy, cz);
-      // coarse tiles (seen from orbit) refine sooner, so coasts stay within a pixel or two
-      const split = n.level < MAX_LEVEL && d < n.sizeKm * (n.level <= 5 && camAlt > 300 ? 7 : SPLIT);
+      // coarse tiles (seen from orbit) refine sooner, so coasts stay within a pixel or two; the factor eases in with
+      // altitude so nothing coarsens as the camera descends, and stops at level 4 (level-6 children of a level-5 tile
+      // sample the same vertex lattice, since tiles up to level 5 carry twice the segments)
+      const split = n.level < MAX_LEVEL && d < n.sizeKm * (n.level <= 4 ? coarseSplit : SPLIT);
       n.prio = d / n.sizeKm;
       if (split) {
         if (!n.children) {

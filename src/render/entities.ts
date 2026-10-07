@@ -208,10 +208,15 @@ export class Entities {
         if (sail) { const r = Math.hypot(p3[0], p3[1], p3[2]); const k = (R_KM + 0.0004) / r; if (k > 1) { p3[0] *= k; p3[1] *= k; p3[2] *= k; } }
         this.personPos.set(P.id[i], [p3[0], p3[1], p3[2]]);
         if (this.kmTo(p3, target) > range) continue;
-        // someone standing in the observer's eye would only fill the screen with a clipped head
-        if (this.kmTo(p3, cam) < 0.0025) continue;
-        const heading = Math.atan2(dx, -(P.y[i] - P.py[i])) || (P.id[i] % 628) / 100;
         const sc = (a.age === 0 ? 0.62 : a.age === 2 ? 0.95 : 1) * (a.female ? 0.95 : 1) * KM;
+        // leave out only someone the observer's eye is actually inside: within 0.4 m of their body's axis, feet to head
+        {
+          const r = Math.hypot(p3[0], p3[1], p3[2]);
+          const vx = cam[0] - p3[0], vy = cam[1] - p3[1], vz = cam[2] - p3[2];
+          const along = Math.min(1.7 * sc, Math.max(0, (vx * p3[0] + vy * p3[1] + vz * p3[2]) / r));
+          if (Math.hypot(vx - (p3[0] / r) * along, vy - (p3[1] / r) * along, vz - (p3[2] / r) * along) < 0.4 * KM) continue;
+        }
+        const heading = Math.atan2(dx, -(P.y[i] - P.py[i])) || (P.id[i] % 628) / 100;
         const walking = a.act === ACT.walk || (Math.abs(dx) + Math.abs(P.y[i] - P.py[i]) > 1e-7 && a.act !== ACT.sleep);
         const bob = walking ? Math.abs(Math.sin(time * 9 + P.id[i])) * 0.04 * KM : a.act === ACT.work || a.act === ACT.build ? Math.abs(Math.sin(time * 5 + P.id[i])) * 0.06 * KM : 0;
         if (bob) { const r = Math.hypot(p3[0], p3[1], p3[2]); const k = (r + bob) / r; p3[0] *= k; p3[1] *= k; p3[2] *= k; }

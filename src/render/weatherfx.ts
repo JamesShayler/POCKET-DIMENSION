@@ -110,7 +110,10 @@ export class WeatherFx {
       const k = mat === this.lowMat ? 6 : 14;
       const t = day * k;
       const wrap = (v: number) => v - Math.floor(v / 289) * 289;
+      // every offset is wrapped on the 289-periodic lattice by itself, so none of them ever jumps
       u.uWind.value.set(wrap(t * 0.7), wrap(t * 0.13), wrap(-t * 0.3));
+      u.uWindW.value.set(wrap(t * 0.7 * 0.02), wrap(t * 0.13 * 0.02), wrap(-t * 0.3 * 0.02));
+      u.uWindC.value.set(wrap(t * 0.7 * 0.03), wrap(t * 0.13 * 0.03), wrap(-t * 0.3 * 0.03));
       u.uPix.value = 1 / viewH;
       const sv = u.uStorm.value as THREE.Vector4[];
       for (let k = 0; k < STORMS; k++) {
@@ -220,7 +223,7 @@ function cloudMaterial(f: Fields, altKm: number, layer: number): THREE.ShaderMat
     transparent: true, depthWrite: false, side: THREE.DoubleSide,
     uniforms: {
       uWeather: { value: f.weather }, uSun: { value: new THREE.Vector3(1, 0, 0) }, uTime: { value: 0 }, uDay: { value: 0 }, uCamH: { value: 1 }, uDust: { value: 1 }, uFlash: { value: 0 },
-      uWind: { value: new THREE.Vector3() }, uPix: { value: 0.001 },
+      uWind: { value: new THREE.Vector3() }, uWindW: { value: new THREE.Vector3() }, uWindC: { value: new THREE.Vector3() }, uPix: { value: 0.001 },
       uStorm: { value: Array.from({ length: STORMS }, () => new THREE.Vector4()) }, uStormDepth: { value: new Array(STORMS).fill(0) },
     },
     vertexShader: /* glsl */ `
@@ -230,7 +233,7 @@ function cloudMaterial(f: Fields, altKm: number, layer: number): THREE.ShaderMat
     fragmentShader: /* glsl */ `
       ${LOGDEPTH_FRAG_PARS}
       uniform sampler2D uWeather; uniform vec3 uSun; uniform float uTime; uniform float uDay; uniform float uCamH; uniform float uDust; uniform float uFlash;
-      uniform vec3 uWind; uniform float uPix;
+      uniform vec3 uWind; uniform vec3 uWindW; uniform vec3 uWindC; uniform float uPix;
       uniform vec4 uStorm[${STORMS}]; uniform float uStormDepth[${STORMS}];
       varying vec3 vDir; varying vec3 vView;
       ${NOISE}
@@ -241,11 +244,11 @@ function cloudMaterial(f: Fields, altKm: number, layer: number): THREE.ShaderMat
         vec3 d = normalize(vDir);
         // the weather grid is ~50 km: warp the lookup and break up the cover with large-scale noise so cloud masses
         // seen from orbit have ragged, drifting edges instead of following the grid
-        vec3 dw = d * 30.0 + uWind * 0.02;
+        vec3 dw = d * 30.0 + uWindW;
         vec2 uv = uvOf(d) + (vec2(fbm3(dw), fbm3(dw + 7.0)) - 0.5) * vec2(0.016, 0.028);
         vec4 wx = texture2D(uWeather, uv);
         float cover = ${layer === 0 ? 'wx.r' : 'smoothstep(0.25, 0.9, wx.r) * 0.8 + 0.12'};
-        cover = clamp(cover + (fbm3(d * ${layer === 0 ? '14.0' : '8.0'} + uWind * 0.03 + 3.0) - 0.5) * 0.5, 0.0, 1.0);
+        cover = clamp(cover + (fbm3(d * ${layer === 0 ? '14.0' : '8.0'} + uWindC + 3.0) - 0.5) * 0.5, 0.0, 1.0);
         // storms: a swirling spiral with a clear eye
         vec3 p = d;
         float swirl = 0.0;

@@ -315,6 +315,8 @@ export class TerrainGen {
         wpos[v * 3] = D[k * 3] * r - center[0]; wpos[v * 3 + 1] = D[k * 3 + 1] * r - center[1]; wpos[v * 3 + 2] = D[k * 3 + 2] * r - center[2];
         wdir[v * 3] = D[k * 3]; wdir[v * 3 + 1] = D[k * 3 + 1]; wdir[v * 3 + 2] = D[k * 3 + 2];
         wdepth[v] = wl - Hh[k];
+        // the observer's floor follows the water as drawn (dry vertices borrow a neighbour's level at the shore)
+        if (wl > surface[v]) surface[v] = wl;
       }
       const widx: number[] = [];
       for (let b = 0; b < SEG; b++) for (let a = 0; a < SEG; a++) {

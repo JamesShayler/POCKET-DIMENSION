@@ -32,6 +32,9 @@ interface PersonRec {
 }
 
 const WEATHER_ARRAYS = ['T', 'q', 'cloud', 'precip', 'sst', 'cu', 'cv', 'upwell', 'rain3', 'lightning', 'seasonRain', 'climRain', 'climN', 'rainAcc', 'tAcc', 'wSoil', 'wVeg'] as const;
+// the winds and pressure of the last integration step are read between steps (wildfires spread with the wind), so a
+// restored world needs them exactly; saves made before they were stored fall back to the constructor's state
+const WEATHER_OPTIONAL = ['u', 'v', 'p'] as const;
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
 const arr = (a: Float32Array, alive: boolean): number[] => (alive ? Array.from(a) : Array.from(a, r3));
@@ -67,7 +70,7 @@ export function serialize(w: World): string {
       frost: b64(w.env.frost), soilMean: b64(w.env.soilMean), soilAcc: b64(w.env.soilAcc), soilDays: w.env.soilDays,
       burned: b64(w.env.burned), burning: b64(w.env.burning), fires: w.env.fires, nextFire: w.env.nextFire, quakes: w.env.quakes,
     },
-    weather: WEATHER_ARRAYS.reduce((o, k) => ({ ...o, [k]: b64(w.weather[k]) }), {
+    weather: [...WEATHER_ARRAYS, ...WEATHER_OPTIONAL].reduce((o, k) => ({ ...o, [k]: b64(w.weather[k]) }), {
       storms: w.weather.storms, nextStorm: w.weather.nextStorm, acc: w.weather.acc, seasonsObserved: w.weather.seasonsObserved,
       seasonDays: w.weather.seasonDays, sstAcc: w.weather.sstAcc, surfAcc: w.weather.surfAcc, rng: w.weather.rng.state,
     } as Record<string, unknown>),
@@ -90,6 +93,8 @@ export function serialize(w: World): string {
     space: { satellites: w.space.satellites, missions: w.space.missions, routes: w.space.routes, programs: [...w.space.programs], next: w.space.next },
     marine: {
       species: w.marine.species.map((sp) => ({ ...sp, pop: b64(sp.pop), drift: b64(sp.drift) })), next: w.marine.next, rng: w.marine.rng.state, catch: b64(w.marine.catch),
+      // sea temperature and productivity as last measured (once a season, but fishing reads them every day)
+      sst: b64(w.marine.sst), prod: b64(w.marine.prod),
     },
     discovered: [...w.discoveredComps],
     famineAt: [...w.famineAt], lastMigration: [...w.lastMigration], diseaseAt: [...w.diseaseAt], recentDroughts: w.env.recentDroughts,
@@ -122,6 +127,7 @@ export function deserialize(json: string): World {
     const a = w.weather[k];
     a.set(unb64(wd[k], a.constructor as { new (buf: ArrayBuffer): typeof a }) as never);
   }
+  for (const k of WEATHER_OPTIONAL) if (wd[k]) w.weather[k].set(unb64(wd[k], Float32Array));
   Object.assign(w.weather, { storms: wd.storms, nextStorm: wd.nextStorm, acc: wd.acc, seasonsObserved: wd.seasonsObserved, seasonDays: wd.seasonDays, sstAcc: wd.sstAcc, surfAcc: wd.surfAcc });
   w.weather.rng = new Rng(wd.rng);
   w.eco.species = d.species as Species[]; w.eco.nextSpecies = d.nextSpecies;
@@ -157,6 +163,7 @@ export function deserialize(json: string): World {
   Object.assign(w.space, { satellites: d.space.satellites, missions: d.space.missions, routes: d.space.routes, programs: new Map(d.space.programs), next: d.space.next });
   w.marine.species = (d.marine.species as any[]).map((sp) => ({ ...sp, pop: unb64(sp.pop, Float32Array), drift: unb64(sp.drift, Float32Array) }));
   w.marine.next = d.marine.next; w.marine.rng = new Rng(d.marine.rng); w.marine.catch.set(unb64(d.marine.catch, Float32Array));
+  if (d.marine.sst) { w.marine.sst.set(unb64(d.marine.sst, Float32Array)); w.marine.prod.set(unb64(d.marine.prod, Float32Array)); }
   w.famineAt = new Map(d.famineAt); w.lastMigration = new Map(d.lastMigration); w.diseaseAt = new Map(d.diseaseAt ?? []); w.env.recentDroughts = d.recentDroughts;
   w.history.events = d.history.events; w.history.nextId = d.history.nextId; w.history.counts = d.history.counts;
   return w;
