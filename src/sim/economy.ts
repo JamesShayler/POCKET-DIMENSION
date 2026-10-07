@@ -167,7 +167,10 @@ function startProjects(w: World, s: Settlement, plan: { start: BKind[] }) {
   // reserve (essentials excepted), so houses go up in timber or brick rather than eating the stone for a wall or a pad
   const great = plan.start.find((k) => GREAT_WORKS.includes(k));
   const reserve: Partial<Record<string, number>> = s.reserve ?? {};
-  for (const k of plan.start) {
+  // a great work the town has finally saved enough for goes first, ahead of the endless queue of houses
+  const ready = great && (Object.keys(BDEFS[great].cost) as ResKey[]).every((rk) => s.res[rk] >= (BDEFS[great].cost[rk] ?? 0));
+  const order = ready ? [great, ...plan.start.filter((k) => k !== great)] : plan.start;
+  for (const k of order) {
     if (started >= slots) break;
     const isHome = HOUSING.includes(k);
     // among housing tiers only the best affordable one is built (or a hut if people are freezing); a new house
