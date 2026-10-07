@@ -55,12 +55,21 @@ same planet, climate, rivers, resources and initial life; share the link under t
    with sound changes, eroding endings and shifting order; trade pidgins drop the endings. Caravans, then sea lanes and air
    routes, carry surplus where it is scarce. Wars mobilise armies that march, cross the sea (after beating the defenders'
    fleet), and besiege walled towns — starving them and battering a breach, faster with siege engines and cannon.
-9. **From stone to space.** Technologies are discovered under local pressure and resources and spread by contact (further with
-   writing, printing, steam and radio): fire, tools, agriculture, pottery, weaving, metallurgy, architecture, writing, mathematics,
-   navigation, engineering, ironworking, astronomy, medicine, printing, chemistry, gunpowder, steam, industry, electricity,
-   combustion, radio, flight, computing, rocketry, spaceflight. Each has real effects (productivity, yields, health, travel,
-   ocean crossings, military strength, governable distance, invention rate). Space programs launch satellites (which you can see
-   crossing the night sky), put people in orbit, build stations, land on the moon and send probes to the other planets.
+9. **From stone to space — earned, not unlocked.** Every art goes through stages in each town: someone gets the idea;
+   the town starts experiments that use up materials; most attempts fail, and every failure is a lesson that raises the
+   odds of the next. Dangerous arts fail dangerously — furnaces burst, buildings collapse in construction, boats and whole
+   expeditions are lost at sea, boilers explode, flying machines crash — and after deaths a cautious people may forbid the
+   work for a generation. When an attempt finally works the art is crude (about a third of its full effect) and has to
+   be practised for generations — by farmers, potters, smiths, masons, scholars, factories, launch crews — before it is
+   mastered; buildings need the arts practised well enough. Experts dying, a town shrinking, plague, famine, collapse or a
+   sack wear mastery down, and an art can be lost (writing helps it be remembered). Neighbours learn by contact: the
+   idea and the lessons travel, the mastery does not. A people's great ideas are worked on at one town that draws on the
+   whole people. The arts: fire, tools, agriculture, pottery, weaving, metallurgy, architecture, writing, mathematics,
+   navigation, engineering, ironworking, astronomy, seafaring (crossing the open ocean), medicine, printing, chemistry,
+   gunpowder, steam, industry, electricity, combustion, radio, flight, computing, rocketry, spaceflight. Space programs
+   lose rockets until rocketry is mastered and crews until spaceflight is (a lost crew grounds a program for years); the
+   moon needs real mastery. The almanac keeps the world's ledger: who first made each art work, where, after how many
+   years, failed attempts and lives — and which arts were lost.
 10. **A history that writes itself.** Every important event carries *why it happened*.
 
 ## Observing

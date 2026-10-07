@@ -493,7 +493,8 @@ export function firstSuccess(w: World, s: Settlement, t: TechDef, tp: TechProgre
       cause: `${s.name} (${s.pop} people${t.civPop ? `, drawing on the ${c?.civPop ?? s.pop} of the ${civ?.name ?? 'people'}` : ''}) built on ${pre.length ? pre.join(' and ') : 'what it already knew'}`
         + `${Object.keys(t.needs ?? {}).length ? ' with what it needed close at hand' : ''}`
         + `${prev.length ? `; ${prev.join(' and ')} had led the work before` : ''}`
-        + `${L.pre[1] ? `; ${L.pre[1]} failure${L.pre[1] > 1 ? 's' : ''} had cost ${L.pre[2]} li${L.pre[2] === 1 ? 'fe' : 'ves'}` : ''}.`,
+        + `${L.pre[1] > fails ? `; across the world ${L.pre[1]} attempts had failed before this` : ''}`
+        + `${L.pre[2] ? `; the work had cost ${L.pre[2]} li${L.pre[2] === 1 ? 'fe' : 'ves'}` : ''}.`,
     });
   } else {
     w.history.record('TECHNOLOGY_DISCOVERY', day, `${s.name} made ${lc(t)} work on its own${fails ? ` after ${fails} failed attempt${fails > 1 ? 's' : ''}` : ''}.`, chron(w, t.difficulty >= 100 ? 1 : 0, tp), {
