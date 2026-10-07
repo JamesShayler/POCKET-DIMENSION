@@ -15,7 +15,7 @@ import { roleName } from './marine';
 import { AU_KM, MOON, orbitMinutes } from './space';
 import { wallFactor } from './diplomacy';
 import { mastery, military } from './techfx';
-import { attemptChance } from './research';
+import { attemptChance, trialFrac } from './research';
 
 /**
  * The words and tables of the observer's panels, written where the world lives (the simulation worker), so the interface
@@ -55,11 +55,15 @@ export class Panels {
         const prev = tp.pl.map((id) => { const q = w.people.get(id); return q ? `${esc(q.name)}${q.alive ? '' : ` †${yearOf(q.death)}`}` : '?'; });
         let pre = 1;
         for (const q of d.prereq) pre = Math.min(pre, mastery(s, q));
-        const ps = attemptChance(d, tp.xp, lead && lead.alive ? lead : undefined, 1, pre);
-        const yrs = tp.r > 0 ? Math.max(0, ((tp.by ? 0.075 : 0.15) - tp.w) / tp.r) : Infinity;
+        const frac = trialFrac(s, d);
+        const ps = attemptChance(d, tp.xp, lead && lead.alive ? lead : undefined, frac, pre);
+        const aw = tp.by ? 0.075 : 0.15;
+        // a town short of materials saves up (up to half as long again) before trying with what it has
+        const saving = tp.w >= aw && frac < 0.25;
+        const yrs = tp.r > 0 ? Math.max(0, ((saving ? 1.5 * aw : aw) - tp.w) / tp.r) : Infinity;
         exp.push(`<div><b>${esc(d.name)}</b> ${dim(`· ${Math.max(1, yearOf(w.day - tp.d))} years of experiments · ${tp.f} failed attempt${tp.f === 1 ? '' : 's'}${tp.k ? ` · ${tp.k} li${tp.k === 1 ? 'fe' : 'ves'} lost` : ''}`)}`
           + `${lead ? ` · led by ${this.pname(lead.id)}` : ''}${prev.length ? dim(` (after ${prev.join(', ')})`) : ''}`
-          + ` ${dim(`· next attempt ≈ ${Math.round(ps * 100)}%${Number.isFinite(yrs) ? ` in ~${Math.max(1, Math.round(yrs))} year${Math.round(yrs) > 1 ? 's' : ''}` : ''}${tp.bl > 0 ? ' · stalled' : ''}`)}${tp.by ? ` ${dim('· learning from')} ${sname(tp.by)}` : ''}</div>`);
+          + ` ${dim(`· ${saving ? 'saving materials; ' : ''}next attempt ≈ ${Math.round(ps * 100)}%${Number.isFinite(yrs) ? ` in ~${Math.max(1, Math.round(yrs))} year${Math.round(yrs) > 1 ? 's' : ''}` : ''}${tp.bl > 0 ? ' · stalled' : ''}`)}${tp.by ? ` ${dim('· learning from')} ${sname(tp.by)}` : ''}</div>`);
       } else if (tp.st === 1) {
         if (tp.why === 'lost') shelved.push(`<div>${esc(d.name)} ${dim(`· lost; remembered (lessons ${Math.round(tp.xp)})`)}</div>`);
         else if (tp.until > w.day) shelved.push(`<div>${esc(d.name)} ${dim(tp.why === 'deaths' ? `· forbidden after ${tp.k} death${tp.k === 1 ? '' : 's'}; may resume ≈ ${yearOf(tp.until)}` : `· given up; may resume ≈ ${yearOf(tp.until)}`)}</div>`);
@@ -83,7 +87,8 @@ export class Panels {
       if (L.first === -2) return dim('before records');
       const who = L.by ? w.people.get(L.by) : undefined;
       const at = L.at ? w.settlements[L.at - 1] : undefined;
-      return `${formatYear(L.first)}${who ? ' · ' + this.pname(who.id) : ''}${at ? ' · ' + this.link('settlement', at.id, at.name) : ''} ${dim(`after ${L.pre[1]} failure${L.pre[1] === 1 ? '' : 's'}${L.took ? ` over ${Math.max(1, Math.round(L.took / Y))} years` : ''}${L.pre[2] ? ` · ${L.pre[2]} li${L.pre[2] === 1 ? 'fe' : 'ves'} lost` : ''}`)}`;
+      const cost = L.pre[0] < 0 ? '' : `after ${L.pre[1]} failure${L.pre[1] === 1 ? '' : 's'}${L.took ? ` over ${Math.max(1, Math.round(L.took / Y))} years` : ''}${L.pre[2] ? ` · ${L.pre[2]} li${L.pre[2] === 1 ? 'fe' : 'ves'} lost` : ''}`;
+      return `${formatYear(L.first)}${who ? ' · ' + this.pname(who.id) : ''}${at ? ' · ' + this.link('settlement', at.id, at.name) : ''} ${dim(cost)}`;
     };
     const rows = TECH_IDS.map((t) => {
       const d = TECHS[t];
@@ -270,7 +275,7 @@ export class Panels {
       const hs = w.settlements[p.home - 1];
       for (const t of TECH_IDS) {
         const tp = hs?.prog?.[t];
-        if (tp && tp.lead === p.id && tp.st <= 4) leads.push(`${tp.st === 2 ? 'Leads the experiments with' : 'Leads the work on'} ${esc(TECHS[t].name.toLowerCase())} at ${this.link('settlement', hs.id, hs.name)}: ${Math.max(1, yearOf(w.day - tp.d))} years${tp.f ? `, ${tp.f} failed attempt${tp.f > 1 ? 's' : ''}` : ''}`);
+        if (tp && tp.lead === p.id && tp.st >= 2 && tp.st <= 4) leads.push(`${tp.st === 2 ? 'Leads the experiments with' : 'Leads the work on'} ${esc(TECHS[t].name.toLowerCase())} at ${this.link('settlement', hs.id, hs.name)}: ${Math.max(1, yearOf(w.day - (tp.ld ?? tp.d)))} years${tp.f ? `, ${tp.f} failed attempt${tp.f > 1 ? 's' : ''}` : ''}`);
       }
     }
     if (leads.length) parts.push('<h3>Work</h3>' + leads.map((l) => `<div>${l}</div>`).join(''));

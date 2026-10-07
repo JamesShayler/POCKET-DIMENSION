@@ -61,7 +61,7 @@ export function economySeason(w: World, s: Settlement) {
   } else s.ships *= 0.8;
   // factories turn materials into goods; their smoke and clearings spread around the town
   const factories = w.buildings.count(s.id, 'factory');
-  if (factories) {
+  if (factories && eff(s, 'industry') > 0) {
     const use = Math.min(s.res.wood * 0.2, factories * 30);
     s.res.wood -= use;
     s.goods += (factories * 25 + use * 1.5) * eff(s, 'industry');

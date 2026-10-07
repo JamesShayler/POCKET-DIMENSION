@@ -1,5 +1,5 @@
 import type { World } from './world';
-import { military } from './techfx';
+import { eff, military } from './techfx';
 import type { Band } from './behavior';
 import type { Person } from './people';
 import { P } from './people';
@@ -234,7 +234,7 @@ export class Diplomacy {
         return;
       } else if (w.day - (b.lastAssault ?? b.siege) < 15) return;
       b.lastAssault = w.day;
-      const breach = Math.min(0.75, (days / 300) * (from?.tech.has('engineering') ? 2 : 1) * (from?.tech.has('gunpowder') ? 2.5 : 1));
+      const breach = Math.min(0.75, (days / 300) * (1 + eff(from, 'engineering')) * (1 + 1.5 * eff(from, 'gunpowder')));
       def *= 1 + (walls - 1) * (1 - breach);
     }
     const win = w.random() < atk / (atk + def + 0.01);
@@ -294,8 +294,8 @@ export function wallFactor(w: World, s: Settlement, attacker?: Settlement): numb
   const f = w.buildings.count(s.id, 'wall') ? 2.8 : w.buildings.count(s.id, 'palisade') ? 1.7 : 1;
   if (f === 1) return 1;
   let k = 1;
-  if (attacker?.tech.has('engineering')) k *= 0.75;
-  if (attacker?.tech.has('gunpowder')) k *= 0.45;
+  k *= 1 - 0.25 * eff(attacker, 'engineering');
+  k *= 1 - 0.55 * eff(attacker, 'gunpowder');
   return 1 + (f - 1) * k;
 }
 void idx; void wrapX; void yearOf;

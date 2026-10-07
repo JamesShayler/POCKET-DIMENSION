@@ -197,7 +197,7 @@ export class Space {
         const dead = rng.next() < 0.25 ? this.padCrew(pad, 1 + rng.int(2)) : [];
         for (const p of dead) w.die(p, 'a rocket explosion');
         L.k += dead.length;
-        const want = L.first < 0 ? 2 : prog.launches <= 5 ? 1 : 0;
+        const want = L.first === -1 ? 2 : prog.launches <= 5 ? 1 : 0;
         w.history.record('EXPERIMENT', day, `A ${civ.name} rocket exploded ${rng.next() < 0.5 ? 'on the pad' : 'during ascent'} at ${pad.name}${dead.length ? `, killing ${dead.map((p) => p.name).join(' and ')}` : ''}.`, this.weight(want), {
           persons: dead.map((p) => p.id), civ: civ.id, settlement: pad.id, x: pad.x, y: pad.y,
           cause: `Rocketry is unforgiving: ${pad.name}'s rockets were ${Math.round(mR * 100)}% mastered, and this was launch ${prog.launches}.`,
@@ -212,7 +212,7 @@ export class Space {
           prog.failures++;
           const L = ledgerOf(w, 'satellite');
           L.f++;
-          w.history.record('EXPERIMENT', day, `A ${civ.name} satellite launched from ${pad.name} fell back short of orbit.`, this.weight(L.first < 0 ? 1 : 0), {
+          w.history.record('EXPERIMENT', day, `A ${civ.name} satellite launched from ${pad.name} fell back short of orbit.`, this.weight(L.first === -1 ? 1 : 0), {
             civ: civ.id, settlement: pad.id, x: pad.x, y: pad.y, cause: `The rocket could not yet reach orbital speed (rocketry ${Math.round(mR * 100)}% mastered).`,
           });
         }
@@ -221,6 +221,7 @@ export class Space {
       if (prog.crewed === 0 || roll < 0.65) {
         const Lo = ledgerOf(w, 'orbit');
         const crew = this.crew(pad, prog.crewed < 2 ? 1 : 2);
+        if (!crew.length) { this.launchSatellite(civ.id, pad, prog, rng); continue; } // no one fit to fly: it goes up uncrewed
         const name = makeWord(NATURAL_PHONOLOGY, rng, 2);
         Lo.n++;
         if (rng.next() < 0.02 + 0.5 * Math.pow(1 - mS, 1.5)) {
@@ -230,7 +231,7 @@ export class Space {
           civ.legitimacy = clamp(civ.legitimacy - 0.1, -1, 1);
           practise(pad, 'spaceflight', 0.05);
           Lo.f++; Lo.k += crew.length;
-          w.history.record('DISASTER', day, `The crew of the ${civ.name} capsule ${name} died when their rocket exploded${crew.length ? `: ${crew.map((p) => p.name).join(' and ')}` : ''}.`, this.weight(Lo.first < 0 || prog.crewLost === 1 ? 2 : 1), {
+          w.history.record('DISASTER', day, `The crew of the ${civ.name} capsule ${name} died when their rocket exploded${crew.length ? `: ${crew.map((p) => p.name).join(' and ')}` : ''}.`, this.weight(Lo.first === -1 || prog.crewLost === 1 ? 2 : 1), {
             persons: crew.map((p) => p.id), civ: civ.id, settlement: pad.id, x: pad.x, y: pad.y,
             cause: `Crewed spaceflight was still ${Math.round(mS * 100)}% mastered; the programme was grounded until ${Math.floor(prog.grounded / DAYS_PER_YEAR)}.`,
           });
@@ -240,7 +241,7 @@ export class Space {
         prog.crewed++;
         if (prog.crewed === 1) {
           const astro = crew[0];
-          const worldFirst = Lo.first < 0;
+          const worldFirst = Lo.first === -1;
           if (worldFirst) { Lo.first = day; Lo.by = astro?.id ?? 0; Lo.at = pad.id; Lo.civ = civ.id; Lo.pre = [Lo.n - 1, Lo.f, Lo.k]; }
           w.history.record('DISCOVERY', day, worldFirst
             ? `${astro ? astro.name : 'An astronaut'} of the ${civ.name} became the first person to orbit the world.`
@@ -254,7 +255,7 @@ export class Space {
           this.satellites.push({ id: this.next++, civ: civ.id, name: makeWord(NATURAL_PHONOLOGY, rng, 2), kind: 'station', launched: day, altKm: 350 + rng.next() * 150, inc: 0.4 + rng.next() * 0.5, raan: rng.next() * 6.28, phase: rng.next(), until: day + 40 * DAYS_PER_YEAR });
           w.history.record('GROWTH', day, `The ${civ.name} assembled a space station in orbit.`, 2, { civ: civ.id, x: pad.x, y: pad.y, cause: 'Repeated crewed flights made a permanent home in orbit possible.' });
         }
-      } else if (prog.moonLanding < 0 && prog.crewed >= 2 && mS >= 0.55 && roll < 0.82 && !this.missions.some((m) => m.civ === civ.id && m.target < 0 && !m.done)) {
+      } else if (prog.moonLanding < 0 && prog.crewed >= 2 && mS >= 0.55 && roll < 0.82 && !this.missions.some((m) => m.civ === civ.id && m.target < 0 && !m.done) && this.crew(pad, 3).length) {
         const crew = this.crew(pad, 3);
         const t = 3 + rng.next() * 2;
         this.missions.push({ id: this.next++, civ: civ.id, name: makeWord(NATURAL_PHONOLOGY, rng, 2), target: -1, crewed: true, crew: crew.map((p) => p.id), launched: day, arrive: day + t, landed: true, done: false, skill: mS });
@@ -276,7 +277,7 @@ export class Space {
       const civ = w.civs[m.civ - 1];
       const prog = this.program(m.civ);
       if (m.target < 0) {
-        const crew = m.crew.map((id) => w.people.get(id)!).filter(Boolean);
+        const crew = m.crew.map((id) => w.people.get(id)).filter((p): p is Person => !!p && p.alive);
         const Lm = ledgerOf(w, 'moon');
         Lm.n++;
         if (rng.next() >= 0.35 + 0.6 * (m.skill ?? 1)) {
@@ -287,16 +288,16 @@ export class Space {
             });
           } else {
             Lm.f++; Lm.k += crew.length;
-            for (const p of crew) w.die(p, 'lost in space');
+            for (const p of crew) w.die(p, 'a lost moon mission');
             prog.moonFails = (prog.moonFails ?? 0) + 1;
             prog.grounded = day + (2 + 3 * rng.next()) * DAYS_PER_YEAR;
-            w.history.record('DISASTER', day, `The crew of the ${m.name} were lost on their way to the moon: ${crew.map((p) => p.name).join(', ') || 'all aboard'}.`, this.weight(Lm.first < 0 ? 2 : 1), {
+            w.history.record('DISASTER', day, `The crew of the ${m.name} were lost on their way to the moon: ${crew.map((p) => p.name).join(', ') || 'all aboard'}.`, this.weight(Lm.first === -1 ? 2 : 1), {
               persons: crew.map((p) => p.id), civ: m.civ, cause: `A ${(m.arrive - m.launched).toFixed(0)}-day voyage beyond any help; the ${civ?.name ?? 'lost'} programme was grounded.`,
             });
           }
           continue;
         }
-        const first = Lm.first < 0;
+        const first = Lm.first === -1;
         if (first) { Lm.first = day; Lm.by = crew[0]?.id ?? 0; Lm.civ = m.civ; Lm.pre = [Lm.n - 1, Lm.f, Lm.k]; }
         if (prog.moonLanding < 0) prog.moonLanding = day;
         w.history.record('DISCOVERY', day, `${crew.map((p) => p.name).join(', ') || 'A crew'} of the ${civ?.name ?? 'lost'} landed on the moon${first ? ' — the first people to walk on another world' : ''}.`, this.weight(first ? 3 : 2), {
@@ -326,8 +327,16 @@ export class Space {
     return want;
   }
 
+  /** People away on a mission that has not yet come home cannot fly (or die on the pad) meanwhile. */
+  private busy(): Set<number> {
+    const b = new Set<number>();
+    for (const m of this.missions) if (!m.done) for (const id of m.crew) b.add(id);
+    return b;
+  }
+
   private padCrew(s: Settlement, n: number) {
-    const adults = (this.world.residents.get(s.id) ?? []).filter((p) => p.alive && !p.band && p.ageYears(this.world.day) >= 18);
+    const busy = this.busy();
+    const adults = (this.world.residents.get(s.id) ?? []).filter((p) => p.alive && !p.band && !busy.has(p.id) && p.ageYears(this.world.day) >= 18);
     const out: Person[] = [];
     for (let k = 0; k < n * 3 && out.length < n && adults.length; k++) {
       const p = adults[this.world.rng.int(adults.length)];
@@ -349,7 +358,7 @@ export class Space {
     if (prog.firstSatellite < 0) {
       prog.firstSatellite = w.day;
       const L = ledgerOf(w, 'satellite');
-      const worldFirst = L.first < 0;
+      const worldFirst = L.first === -1;
       if (worldFirst) { L.first = w.day; L.at = pad.id; L.civ = civ; L.pre = [prog.launches - 1, L.f, L.k]; }
       const civName = w.civs[civ - 1]?.name;
       w.history.record('DISCOVERY', w.day, worldFirst
@@ -362,7 +371,8 @@ export class Space {
   }
 
   private crew(s: Settlement, n: number) {
-    const adults = (this.world.residents.get(s.id) ?? []).filter((p) => p.alive && !p.band && p.ageYears(this.world.day) > 25 && p.ageYears(this.world.day) < 45);
+    const busy = this.busy();
+    const adults = (this.world.residents.get(s.id) ?? []).filter((p) => p.alive && !p.band && !busy.has(p.id) && p.ageYears(this.world.day) > 25 && p.ageYears(this.world.day) < 45);
     adults.sort((a, b) => b.personality[3] + b.health - (a.personality[3] + a.health));
     return adults.slice(0, n);
   }

@@ -9,7 +9,7 @@ import { NR, W, KM_PER_CELL_Y, kmPerCellX, wrapDx, regionOfCell, idx, wrapX } fr
 import { clamp, mix32 } from './rng';
 import { seasonOf } from './time';
 import { WALK_KMH as WALK, kmTo, walk } from './behavior';
-import { travelMult, workMult, yieldMult } from './techfx';
+import { eff, travelMult, workMult, yieldMult } from './techfx';
 
 /** The physical work loop. A person walks to a real node of a real resource, works there for a number of hours that
  *  depends on tools and skill, carries a load home and deposits it at the stockpile. Fields, buildings, kilns and
@@ -263,10 +263,10 @@ export function fieldYield(w: World, s: Settlement, b: Building, skill: number):
   // with live weather, drought and frost have already marked the crop as it grew; otherwise use the regional anomaly
   const rain = w.weather.seasonsObserved > 2 ? clamp(0.9 + 0.15 * w.env.anomaly[reg], 0.9, 1.15) : clamp(Math.pow(w.env.anomaly[reg], 1.1), 0.1, 1.25);
   let y = 480 * (0.25 + w.env.fert[cell]) * rain * (0.7 + 0.7 * skill) * (1 - 0.6 * clamp(b.weeds)) * (1 - clamp(b.crop)) * yieldMult(s);
-  if (s.tech.has('tools')) y *= 1.15;
+  y *= 1 + 0.15 * eff(s, 'tools');
   if (s.toolTier >= 2) y *= 1.15;
-  if (s.tech.has('mathematics')) y *= 1.12;
-  if (s.tech.has('engineering')) y *= 1.25;
+  y *= 1 + 0.12 * eff(s, 'mathematics');
+  y *= 1 + 0.25 * eff(s, 'engineering');
   // overripe crops spoil in the field
   const late = Math.max(0, w.day - (b.planted + GROW_DAYS) - 45);
   y *= clamp(1 - late / 120, 0.35, 1);
@@ -445,7 +445,7 @@ export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine:
       // ---------- building ----------
       case 'build': {
         const b = w.buildings.get(p.tb);
-        if (!b || b.done >= 0) { p.task = ''; p.phase = 0; break; }
+        if (!b || b.done !== -1) { p.task = ''; p.phase = 0; break; }
         if (p.phase === 1) {
           const need = kmTo(p, b.x, b.y) / WALK_KMH;
           if (need <= hours) { p.x = b.x; p.y = b.y; hours -= need; p.phase = 2; }
@@ -464,7 +464,8 @@ export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine:
       }
       // ---------- crafting ----------
       case 'craft': {
-        const b = p.tb ? w.buildings.get(p.tb) : undefined;
+        const bb = p.tb ? w.buildings.get(p.tb) : undefined;
+        const b = bb && bb.done >= 0 ? bb : undefined; // a ruined workshop is no workshop
         const spot = b ? { x: b.x, y: b.y } : { x: s.x, y: s.y };
         if (p.phase === 1) {
           const need = kmTo(p, spot.x, spot.y) / WALK_KMH;

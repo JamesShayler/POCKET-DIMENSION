@@ -10,7 +10,7 @@ import { NV, VALUE_KEYS } from './culture';
 import { economySeason } from './economy';
 import { wallFactor } from './diplomacy';
 import { RES_KEYS } from './buildings';
-import { governRange, mastery, oceanGoing, yieldMult } from './techfx';
+import { eff, governRange, mastery, oceanGoing, yieldMult } from './techfx';
 import { knowOf, practise, researchSeason, shock } from './research';
 
 const TECH_RATE = 0.35;
@@ -41,7 +41,7 @@ function capacity(w: World, s: Settlement): number {
     tot += has(s, 'agriculture') ? 15 * fertile + 1.5 : 3.2 * fertile;
   }
   // better farming (calendars, fertilisers, machines) lets the same land feed more people
-  return tot * (has(s, 'mathematics') ? 1.15 : 1) * (has(s, 'engineering') ? 1.3 : 1) * yieldMult(s) * (has(s, 'medicine') ? 1.1 : 1);
+  return tot * (1 + 0.15 * eff(s, 'mathematics')) * (1 + 0.3 * eff(s, 'engineering')) * yieldMult(s) * (1 + 0.1 * eff(s, 'medicine'));
 }
 
 // ============================ settlement season ============================
@@ -68,7 +68,6 @@ export function settlementSeason(w: World) {
     s.peak = Math.max(s.peak, s.pop);
     if (s.pop === 0) {
       s.abandoned = day;
-      s.prog = {};
       w.history.record('GROWTH', day, `${s.name} was abandoned.`, s.peak > 25 ? 1 : 0, { settlement: s.id, civ: s.civ, x: s.x, y: s.y, cause: 'Its last inhabitants died or left.' });
       continue;
     }
@@ -315,7 +314,7 @@ export function startMigration(w: World, s: Settlement, reason: string) {
     const m = Math.max(mastery(s, 'seafaring'), mastery(s, 'steam'));
     const pLost = 0.02 + 0.45 * (1 - m) * (1 - m);
     if (rng.next() < pLost) {
-      for (const p of members) w.die(p, 'lost at sea');
+      for (const p of members) w.die(p, 'a shipwreck');
       s.ships = Math.max(0, s.ships - 1);
       practise(s, 'seafaring', 0.03);
       w.history.record('EXPERIMENT', w.day, `${seed.name} led ${members.length} people from ${s.name} out across the open ocean; they were never seen again.`, members.length >= 15 ? 2 : 1, {

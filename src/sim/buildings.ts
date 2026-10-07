@@ -262,7 +262,7 @@ export class Buildings {
 
   /** Add construction labour (person-hours). Returns true if the building has just been completed. */
   work(b: Building, hours: number, quality = 1): boolean {
-    if (b.done >= 0) return false;
+    if (b.done !== -1) return false; // finished, or ruined (-2): a ruin is not built on
     b.progress = clamp(b.progress + (hours * quality) / BDEFS[b.kind].labor, 0, 1);
     if (b.progress >= 1) {
       b.done = this.world.day;

@@ -70,6 +70,8 @@ export interface TechProgress {
   m: number; pk: number;
   /** who leads the work, and up to three earlier leads (oldest first) */
   lead: number; pl: number[];
+  /** day the present lead took over (older saves: unknown) */
+  ld?: number;
   /** day of this record's last chronicled event */
   ev: number;
   /** settlement that taught it (0 = its own work) */
@@ -84,7 +86,7 @@ export interface TechProgress {
 export interface Ledger {
   /** day of the first success (-1 not yet, -2 before records began), by whom, where, which polity, how long it took */
   first: number; by: number; at: number; civ: number; took: number;
-  /** attempts, failures and lives lost before the first success */
+  /** attempts, failures and lives lost before the first success (-1: not recorded, from an older save) */
   pre: [number, number, number];
   /** programmes ever started */
   p: number;

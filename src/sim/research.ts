@@ -42,7 +42,7 @@ const FRONTIER_GAP = 30 * Y;
 const MAJOR_GAP = 10 * Y;
 const BAD_P: Record<Hazard, number> = { none: 0, fire: 0.35, harvest: 0.6, collapse: 0.4, wreck: 0.5, poison: 0.4, explosion: 0.5, crash: 0.7, shock: 0.3 };
 const ACC: Record<Hazard, number> = { none: 0, explosion: 0.04, crash: 0.05, wreck: 0.03, collapse: 0.02, fire: 0.02, shock: 0.02, poison: 0.015, harvest: 0 };
-const CAUSE: Record<Hazard, string> = { none: 'an accident', harvest: 'hunger', fire: 'a workshop fire', collapse: 'a collapse', wreck: 'lost at sea', poison: 'poisoning', explosion: 'an explosion', crash: 'a crash', shock: 'electrocution' };
+const CAUSE: Record<Hazard, string> = { none: 'an accident', harvest: 'hunger', fire: 'a workshop fire', collapse: 'a collapse', wreck: 'a shipwreck', poison: 'poisoning', explosion: 'an explosion', crash: 'a crash', shock: 'electrocution' };
 const SKILL_FOR: Record<Hazard, number> = { none: -1, harvest: SK.farming, wreck: SK.exploring, crash: SK.exploring, collapse: SK.building, fire: SK.crafting, explosion: SK.crafting, shock: SK.crafting, poison: SK.healing };
 
 const yr = (day: number) => Math.floor(day / Y);
@@ -267,12 +267,13 @@ function checkLead(w: World, s: Settlement, t: TechDef, tp: TechProgress, c: Ctx
         ? `${p.name} left ${s.name}, taking much of what the town knew about ${lc(t)} with them.`
         : `With the death of ${p.name}, ${s.name} lost much of what it knew about ${lc(t)}.`, wgt, {
         persons: [p.id], settlement: s.id, civ: s.civ, culture: s.culture, x: s.x, y: s.y,
-        cause: `${p.name} had led the work for ${Math.max(1, yr(w.day - tp.d))} years${written ? '; written records kept part of it' : ` and ${s.name} kept no written records`}.`,
+        cause: `${p.name} had led the work for ${Math.max(1, yr(w.day - (tp.ld ?? tp.d)))} years${written ? '; written records kept part of it' : ` and ${s.name} kept no written records`}.`,
       });
     }
     tp.lead = 0;
   }
   tp.lead = pickLead(w, s, t, c);
+  tp.ld = w.day;
 }
 
 // ------------------------------------------------------------------ the season
@@ -340,6 +341,7 @@ export function researchSeason(w: World, alive: Settlement[]) {
         }
         continue;
       }
+      tp.g *= 0.95; // grief fades
       if (tp.st === 1) continue;
       if (tp.st === 2) {
         inExperiment++;
@@ -362,7 +364,6 @@ export function researchSeason(w: World, alive: Settlement[]) {
       if (tp.st === 4 && tp.m >= MASTERED) masteredAt(w, s, t, tp);
       else if (tp.st === 5 && tp.m < UNMASTER) { tp.st = 4; tp.d = day; }
       if (t.difficulty >= 100 && tp.m < LOST_M) { loseTech(w, s, id, tp, c); continue; }
-      tp.g *= 0.95;
       if (t.difficulty >= 100 && t.danger > 0 && t.hazard !== 'none') {
         const r = ACC[t.hazard] * (1 - tp.m) * (1 - tp.m) * Math.min(1, P_);
         if (r > 0) { risk += r; risky.push([id, r]); }
@@ -378,7 +379,7 @@ export function researchSeason(w: World, alive: Settlement[]) {
           const tp = prog[id];
           if (!tp || tp.st !== 1 || tp.until > day) continue;
           const t = TECHS[id];
-          if (!okFor(s, t, tp, c, true)) continue;
+          if (!okFor(s, t, tp, c, true) || (t.facility && !facility(s, t.facility))) continue;
           const score = ((tp.by ? 2 : 1) * pressureOf(w, s, id)) / Math.sqrt(t.difficulty);
           if (score > ps) { ps = score; pick = id; }
         }
@@ -400,8 +401,9 @@ function startProgramme(w: World, s: Settlement, t: TechDef, tp: TechProgress, c
   const day = w.day;
   tp.st = 2; tp.d = day; tp.la = day; tp.w = 0; tp.bl = 0; tp.until = 0; tp.why = undefined;
   tp.lead = pickLead(w, s, t, c);
+  tp.ld = day;
   const L = ledgerOf(w, t.id);
-  const frontier = L.first < 0;
+  const frontier = L.first === -1;
   L.p++;
   const lead = w.people.get(tp.lead);
   const pre = t.prereq.filter((q) => TECHS[q].difficulty >= 100).map((q) => `${lc(TECHS[q])} (${Math.round(mastery(s, q) * 100)}%)`);
@@ -415,12 +417,33 @@ function startProgramme(w: World, s: Settlement, t: TechDef, tp: TechProgress, c
 }
 
 // ------------------------------------------------------------------ experiments
+/** Whether the town already gathers this material (the economy only seeks stone, clay and ore once it knows how to use them). */
+function gatherable(s: Settlement, k: ResKey | 'food'): boolean {
+  if (k === 'stone') return s.tech.has('tools');
+  if (k === 'clay') return s.tech.has('pottery');
+  if (k === 'copper' || k === 'iron' || k === 'coal') return s.tech.has('metallurgy');
+  return true;
+}
+
+/** The share of an attempt's materials the town can spare now (1 if it needs none). Exported for the panels. */
+export function trialFrac(s: Settlement, t: TechDef): number {
+  let frac = 1;
+  if (!t.trial) return 1;
+  for (const k of Object.keys(t.trial) as (ResKey | 'food')[]) {
+    const cost = t.trial[k] ?? 0;
+    if (cost <= 0 || !gatherable(s, k)) continue;
+    const free = k === 'food' ? s.food - 3 * s.pop : s.res[k] - (s.reserve?.[k] ?? 0);
+    frac = Math.min(frac, clamp(free / cost, 0, 1));
+  }
+  return frac;
+}
+
 function experiments(w: World, s: Settlement, t: TechDef, tp: TechProgress, c: Ctx, ok: boolean, R: number) {
   const day = w.day;
   if (!ok) {
     tp.bl++;
     if (tp.bl >= STALL_SEASONS) {
-      tp.st = 1; tp.until = day + 10 * Y; tp.why = 'stalled'; tp.bl = 0; tp.w = 0;
+      tp.st = 1; tp.until = day + 10 * Y; tp.why = 'stalled'; tp.bl = 0; tp.w = 0; tp.lead = 0;
       w.history.record('EXPERIMENT', day, `The experiments with ${lc(t)} at ${s.name} were given up.`, chron(w, 0, tp), { settlement: s.id, civ: s.civ, x: s.x, y: s.y, cause: 'For twenty years the work could not go on.' });
     }
     return;
@@ -430,19 +453,21 @@ function experiments(w: World, s: Settlement, t: TechDef, tp: TechProgress, c: C
   tp.w += R / 4;
   const AW = tp.by ? AW_TAUGHT : AW_OWN;
   if (tp.w < AW) { tp.bl = 0; return; }
-  // materials for the attempt (what is set aside for a great work is not touched)
+  // materials for the attempt (what is set aside for a great work is not touched; a material the town cannot yet
+  // gather — stone before tools, clay before pottery, ore before metallurgy — is found by hand as part of the work)
   let frac = 1;
   const trial = t.trial;
   if (trial) {
     for (const k of Object.keys(trial) as (ResKey | 'food')[]) {
       const cost = trial[k] ?? 0;
-      if (cost <= 0) continue;
+      if (cost <= 0 || !gatherable(s, k)) continue;
       const free = k === 'food' ? s.food - 3 * s.pop : s.res[k] - (s.reserve?.[k] ?? 0);
       frac = Math.min(frac, clamp(free / cost, 0, 1));
     }
     if (frac < 0.25 && tp.w < 1.5 * AW) return; // the town saves up for it
     for (const k of Object.keys(trial) as (ResKey | 'food')[]) {
       const cost = trial[k] ?? 0;
+      if (!gatherable(s, k)) continue;
       if (k === 'food') s.food -= Math.min(cost, Math.max(0, s.food - 3 * s.pop));
       else s.res[k] -= Math.min(cost, Math.max(0, s.res[k] - (s.reserve?.[k] ?? 0)));
     }
@@ -512,9 +537,9 @@ export function firstSuccess(w: World, s: Settlement, t: TechDef, tp: TechProgre
 
 function masteredAt(w: World, s: Settlement, t: TechDef, tp: TechProgress) {
   const day = w.day;
-  tp.st = 5; tp.d = day;
+  tp.st = 5; tp.d = day; tp.lead = 0; // a mastered art no longer depends on one person
   const L = ledgerOf(w, t.id);
-  const worldFirst = L.mastered < 0;
+  const worldFirst = L.mastered === -1;
   if (worldFirst) { L.mastered = day; L.mAt = s.id; }
   const civFirst = !w.settlements.some((o) => o !== s && o.civ === s.civ && o.abandoned < 0 && (o.prog?.[t.id]?.st ?? 0) === 5);
   const want = worldFirst ? (t.era ? 2 : t.difficulty >= 100 ? 1 : 0) : civFirst && t.difficulty >= 300 ? 1 : 0;
@@ -526,16 +551,16 @@ function masteredAt(w: World, s: Settlement, t: TechDef, tp: TechProgress) {
 }
 
 // ------------------------------------------------------------------ failure, accidents, loss
-function failure(w: World, s: Settlement, t: TechDef, tp: TechProgress, ps: number, c: Ctx) {
+function failure(w: World, s: Settlement, t: TechDef, tp: TechProgress, ps: number, c: Ctx, forceBad = false) {
   const day = w.day;
   const L = ledgerOf(w, t.id);
-  const frontier = L.first < 0;
+  const frontier = L.first === -1;
   tp.f++; L.f++;
   tp.xp = Math.min(XP_CAP, tp.xp + 1);
   const lead = w.people.get(tp.lead);
   if (lead) lead.reputation = clamp(lead.reputation - 0.02, -1, 1);
   const imp = lead ? lead.personality[P.impulsiveness] : 0.5, pat = lead ? lead.personality[P.patience] : 0.5;
-  const bad = t.hazard !== 'none' && w.rng.next() < Math.min(0.95, BAD_P[t.hazard] * (1 - ps) * (0.7 + 0.6 * imp) * (1.2 - 0.4 * pat));
+  const bad = forceBad || t.hazard !== 'none' && w.rng.next() < Math.min(0.95, BAD_P[t.hazard] * (1 - ps) * (0.7 + 0.6 * imp) * (1.2 - 0.4 * pat));
   const nth = ordinal(tp.f);
   if (!bad) {
     w.history.record('EXPERIMENT', day, `At ${s.name}, ${lead ? `${lead.name}'s` : 'an'} attempt at ${lc(t)} failed: ${t.miss} (attempt ${tp.n}).`, chron(w, frontier ? 1 : 0, tp), {
@@ -765,7 +790,7 @@ export function progFromTech(tech: Set<TechId>, day: number): Partial<Record<Tec
 export function upgradeV3(w: World) {
   for (const s of w.settlements) {
     if (s.tech.has('navigation') && s.tech.has('astronomy')) s.tech.add('seafaring');
-    s.prog = s.abandoned < 0 ? progFromTech(s.tech, w.day) : {};
+    s.prog = progFromTech(s.tech, w.day);
   }
   for (const b of w.bands.values()) if (b.tech.has('navigation') && b.tech.has('astronomy')) b.tech.add('seafaring');
 }
@@ -777,13 +802,13 @@ export function migrateResearch(w: World): Research {
     const ev = w.history.events.find((e) => e.type === 'TECHNOLOGY_DISCOVERY' && e.weight >= 3 && e.text.includes(t.description));
     const known = w.settlements.some((s) => s.tech.has(id));
     if (!ev && !known) continue;
-    const L: Ledger = { first: ev ? ev.day : -2, by: ev?.persons?.[0] ?? 0, at: ev?.settlement ?? 0, civ: ev?.civ ?? 0, took: 0, pre: [0, 0, 0], p: 0, mastered: ev ? ev.day : -2, mAt: ev?.settlement ?? 0, n: 0, f: 0, k: 0, big: -1e9, lost: -1 };
+    const L: Ledger = { first: ev ? ev.day : -2, by: ev?.persons?.[0] ?? 0, at: ev?.settlement ?? 0, civ: ev?.civ ?? 0, took: 0, pre: [-1, -1, -1], p: 0, mastered: ev ? ev.day : -2, mAt: ev?.settlement ?? 0, n: 0, f: 0, k: 0, big: -1e9, lost: -1 };
     r.ledger[id] = L;
   }
   const progs = [...w.space.programs.values()];
   const sat = progs.filter((p) => p.firstSatellite >= 0).map((p) => p.firstSatellite);
   const moon = progs.filter((p) => p.moonLanding >= 0).map((p) => p.moonLanding);
-  const feat = (first: number): Ledger => ({ first, by: 0, at: 0, civ: 0, took: 0, pre: [0, 0, 0], p: 0, mastered: -1, mAt: 0, n: 0, f: 0, k: 0, big: -1e9, lost: -1 });
+  const feat = (first: number): Ledger => ({ first, by: 0, at: 0, civ: 0, took: 0, pre: [-1, -1, -1], p: 0, mastered: -1, mAt: 0, n: 0, f: 0, k: 0, big: -1e9, lost: -1 });
   if (sat.length) r.ledger.satellite = feat(Math.min(...sat));
   if (progs.some((p) => p.crewed > 0)) r.ledger.orbit = feat(w.history.events.find((e) => e.type === 'DISCOVERY' && e.text.includes('first person to orbit'))?.day ?? -2);
   if (moon.length) r.ledger.moon = feat(Math.min(...moon));
@@ -796,12 +821,13 @@ export function forceAttempt(w: World, s: Settlement, id: TechId, outcome: 'succ
   const c = contextOf(w, s);
   if (!s.prog) s.prog = {};
   let tp = s.prog[id];
-  if (!tp || tp.st !== 2) { tp = record(w.day, 2); tp.lead = pickLead(w, s, t, c); s.prog[id] = tp; }
+  if (tp && tp.st >= 3) return; // already made to work here
+  if (!tp || tp.st !== 2) { tp = record(w.day, 2); tp.lead = pickLead(w, s, t, c); tp.ld = w.day; s.prog[id] = tp; }
   tp.n++;
   ledgerOf(w, id).n++;
   if (outcome === 'success') firstSuccess(w, s, t, tp, c);
   else if (outcome === 'fail') failure(w, s, { ...t, hazard: 'none' }, tp, 0.1, c);
-  else failure(w, s, t, tp, 0, c);
+  else failure(w, s, t, tp, 0, c, true);
 }
 
 /** For the panels: the stage of a town's work on an art. */

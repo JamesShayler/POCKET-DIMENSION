@@ -100,11 +100,14 @@ ok(wet === nl && w.weather.seasonsObserved > 0, `weather has run (${w.weather.se
   try {
     const old = deserialize(JSON.stringify(d));
     for (const st of old.activeSettlements()) for (const t of st.tech) { const tp = st.prog[t]; if (!tp || tp.st !== 5 || tp.m !== 0.9) { okLoad = false; msg = `${st.name}: ${t}`; } }
+    // every art known at the load is in the ledger as already achieved, and none is announced again as a world first
+    const known = new Set(old.activeSettlements().flatMap((st) => [...st.tech]));
+    for (const t of known) if ((old.research.ledger[t]?.first ?? -1) === -1) { okLoad = false; msg = `${t} known but not in the ledger`; }
     const before = old.history.nextId;
     for (let i = 0; i < 100; i++) old.step(7);
     for (const e of old.history.events) if (e.id >= before && e.type === 'TECHNOLOGY_DISCOVERY' && e.weight >= 3) {
       const t = TECH_IDS.find((id) => e.text.includes(TECHS[id].success));
-      if (t && old.research.ledger[t] && old.research.ledger[t]!.first !== -1 && old.research.ledger[t]!.first < before) { okLoad = false; msg = 'a known art was announced as a world first'; }
+      if (t && known.has(t)) { okLoad = false; msg = `${t} was announced again as a world first`; }
     }
   } catch (err) { okLoad = false; msg = String(err); }
   ok(okLoad, `a version-3 save loads and continues${msg ? ' — ' + msg : ''}`);
@@ -113,6 +116,7 @@ ok(wet === nl && w.weather.seasonsObserved > 0, `weather has run (${w.weather.se
 {
   const run = () => {
     const x = deserialize(snap);
+    x.step(1); // index residents, so the forced failures have people to lead them and to kill
     const big = x.activeSettlements().slice().sort((p, q) => q.pop - p.pop || p.id - q.id)[0] as Settlement;
     forceAttempt(x, big, 'steam', 'bad');
     forceAttempt(x, big, 'seafaring', 'bad');
@@ -126,7 +130,8 @@ ok(wet === nl && w.weather.seasonsObserved > 0, `weather has run (${w.weather.se
   };
   const A = run(), B = run();
   const sig = (r: { x: World }) => JSON.stringify([r.x.rng.state, r.x.history.nextId, r.x.alive.length, r.x.settlements.map((st) => st.prog)]);
-  ok(sig(A) === sig(B), `forced failures, deaths, a success and a loss replay identically (${A.x.history.counts['EXPERIMENT'] ?? 0} experiment events)`);
+  const deaths = (['steam', 'seafaring', 'flight'] as const).reduce((a, t) => a + (A.big.prog[t]?.k ?? 0), 0);
+  ok(sig(A) === sig(B) && deaths > 0, `forced failures (${deaths} dead), a success and a loss replay identically`);
 }
 // 10. the research arithmetic
 {
