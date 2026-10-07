@@ -30,6 +30,8 @@ export class ObserverView {
   private sunGlow!: THREE.Sprite;
   private moon!: THREE.Mesh;
   private moonLight = new THREE.DirectionalLight(0xffffff, 2.2);
+  private cometObjs: { head: THREE.Sprite; tail: THREE.Line }[] = [];
+  private rock!: THREE.Sprite;
   private ambient = new THREE.AmbientLight(0x1a2338, 1.4);
   private sunLight = new THREE.DirectionalLight(0xfff2d9, 2.6);
   visualPhase = 0.9;
@@ -56,6 +58,19 @@ export class ObserverView {
     this.sunGlow.scale.setScalar(SUN_RADIUS * 9);
     this.moon = new THREE.Mesh(new THREE.SphereGeometry(MOON_RADIUS, 32, 24), new THREE.MeshStandardMaterial({ color: 0xaaa9a4, roughness: 1 }));
     this.scene.add(this.sun, this.sunGlow, this.moon);
+    for (let i = 0; i < world.sky.comets.length; i++) {
+      const head = glowSprite('rgba(190,230,255,1)');
+      head.visible = false;
+      const g = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0, 0, 1)]);
+      g.setAttribute('color', new THREE.Float32BufferAttribute([0.7, 0.85, 1, 0, 0, 0], 3));
+      const tail = new THREE.Line(g, new THREE.LineBasicMaterial({ vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
+      tail.visible = false;
+      this.scene.add(head, tail);
+      this.cometObjs.push({ head, tail });
+    }
+    this.rock = glowSprite('rgba(255,170,90,1)');
+    this.rock.visible = false;
+    this.scene.add(this.rock);
     this.bindInput();
     this.resize();
     window.addEventListener('resize', () => this.resize());
@@ -192,9 +207,9 @@ export class ObserverView {
     this.alpha = alpha;
     this.clock += paused ? 0 : dt;
     // visual day: real rotation when slow, a calm capped rate when fast
-    if (!paused) {
-      if (daysPerSec <= 1.5) this.visualPhase += dt * Math.PI * 2 * Math.min(daysPerSec, 0.1);
-      else {
+    {
+      if (daysPerSec <= 0.5) this.visualPhase = -Math.PI * 2 * (renderDay - Math.floor(renderDay)); // the real sun: it sets in the west, local noon is local noon
+      else if (!paused) {
         // too fast for a day/night cycle to be anything but a strobe: hold a pleasant afternoon over whatever the observer is watching
         let d = this.rig.lon - 0.7 - this.visualPhase;
         d = Math.atan2(Math.sin(d), Math.cos(d));
@@ -214,12 +229,38 @@ export class ObserverView {
     this.moon.position.copy(md).multiplyScalar(MOON_DIST);
     this.moonLight.position.copy(sd).multiplyScalar(1000);
     this.moonLight.target.position.copy(this.moon.position);
+    // sky: comets on their orbits, and a doomed asteroid in its last year
+    this.world.sky.comets.forEach((c, i) => {
+      const st = this.world.sky.cometState(c, renderDay);
+      const o = this.cometObjs[i];
+      if (!o) return;
+      const pos = new THREE.Vector3(...st.dir).multiplyScalar(52000 + st.r * 20000);
+      const sunwards = this.sunDir.clone();
+      o.head.visible = st.bright > 0.002;
+      o.tail.visible = o.head.visible;
+      o.head.position.copy(pos);
+      o.head.scale.setScalar(900 + 9000 * st.bright);
+      (o.head.material as THREE.SpriteMaterial).opacity = Math.min(1, 0.25 + st.bright * 10);
+      o.tail.position.copy(pos);
+      o.tail.scale.setScalar(1);
+      const away = pos.clone().sub(sunwards.multiplyScalar(60000)).normalize();
+      const len = 5000 + 60000 * st.bright;
+      o.tail.geometry.setFromPoints([new THREE.Vector3(), away.multiplyScalar(len)]);
+      o.tail.geometry.setAttribute('color', new THREE.Float32BufferAttribute([0.7, 0.85, 1, 0, 0, 0], 3));
+    });
+    const ap = this.world.sky.approaching(renderDay);
+    this.rock.visible = !!ap;
+    if (ap) {
+      const d = CameraRig.dir(lonOfX(ap.a.x), latOfY(ap.a.y));
+      this.rock.position.copy(d.multiplyScalar(R_KM + 400 + Math.pow(1 - ap.t, 2) * 90000));
+      this.rock.scale.setScalar(500 + ap.t * 6000);
+    }
     this.keyboard(dt);
     this.rig.update(dt);
     const hgt = this.rig.apply(this.camera, (lon, lat) => this.planet.groundRadiusAt(lon, lat));
     this.planet.setLighting(sd, this.camera.position, this.rig.alt + 0 * hgt, this.clock);
     this.rivers.update(this.rig.alt, sd, this.camera.position);
-    this.entities.update(this.rig, this.camera, alpha, this.clock, sd);
+    this.entities.update(this.rig, this.camera, alpha, this.clock, renderDay);
     this.updateLabels();
     this.renderer.render(this.scene, this.camera);
   }

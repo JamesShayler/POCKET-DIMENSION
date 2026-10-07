@@ -71,10 +71,16 @@ export class PlanetView {
         pos[v * 3] = d[0] * r;
         pos[v * 3 + 1] = d[1] * r;
         pos[v * 3 + 2] = d[2] * r;
-        this.x0[v] = xa;
-        this.y0[v] = y0;
-        this.fx[v] = fx;
-        this.fy[v] = fy;
+        // colours sample the simulation through a gently domain-warped lookup, so biome edges wander instead of following the grid
+        const nz = w.planet.terrain.noise;
+        const wcx = cx + nz.fbm(d[0] * 9 + 3, d[1] * 9, d[2] * 9, 2) * 1.1;
+        const wcy = cy + nz.fbm(d[0] * 9, d[1] * 9 + 7, d[2] * 9, 2) * 1.1;
+        const wx0 = Math.floor(wcx);
+        const wy0 = Math.floor(wcy);
+        this.x0[v] = ((wx0 % W) + W) % W;
+        this.y0[v] = wy0;
+        this.fx[v] = wcx - wx0;
+        this.fy[v] = wcy - wy0;
       }
       if (iv % 32 === 0) {
         onProgress?.(iv / NY);

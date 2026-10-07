@@ -117,8 +117,7 @@ export class Environment {
     const cnt = new Uint16Array(NR);
     const phase = seasonPhase(day + 45);
     for (let r = 0; r < NR; r++) this.rainMod[r] = Math.pow(clamp(this.anomaly[r], 0.1, 1.5), 0.8);
-    const regen = world.random() < 0.02;
-    void regen;
+    const dust = world.sky.dust(day);
     for (let i = 0; i < N; i++) {
       if (p.ocean[i]) continue;
       const r = this.cellRegion[i];
@@ -129,7 +128,7 @@ export class Environment {
       cnt[r]++;
       const tvS = clamp((Ts + 2) / 12) * clamp((38 - Ts) / 12);
       const fertMod = 0.55 + 0.45 * this.fert[i];
-      let cap = p.baseVeg[i] * Math.min(1.4, tvS / this.tvMean[i]) * this.rainMod[r] * fertMod * (this.cultivated[i] ? 0.85 : 1);
+      let cap = p.baseVeg[i] * Math.min(1.4, tvS / this.tvMean[i]) * this.rainMod[r] * fertMod * (this.cultivated[i] ? 0.85 : 1) * dust;
       cap = cap > 1 ? 1 : cap;
       const v = this.veg[i];
       this.veg[i] = v + (cap - v) * (cap > v ? 0.55 : 0.5);

@@ -4,6 +4,7 @@ import { ObserverView } from './render/observer';
 import { UI } from './ui/ui';
 import { hasSave, loadFromBrowser, saveToBrowser } from './sim/persistence';
 import { lonOfX, latOfY } from './sim/grid';
+import { formatYear } from './sim/time';
 
 const $ = (id: string) => document.getElementById(id)!;
 const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
@@ -57,6 +58,17 @@ async function boot() {
     await nextFrame(); await nextFrame();
     world = new World(choice.seed);
     world.begin();
+    // Life must evolve before anyone can wake. Run the pre-human world forward until a lineage crosses the threshold.
+    const t0 = performance.now();
+    let guard = 0;
+    while (!world.awakened && world.year < 12000 && guard++ < 100000) {
+      const ts = performance.now();
+      while (performance.now() - ts < 30 && !world.awakened) world.stepPrehistory(4);
+      const t = world.eco.totals();
+      setLoading('Life is evolving…', `year ${world.year.toLocaleString()} · ${t.species} species · ${t.animals.toLocaleString()} animals`);
+      await nextFrame();
+    }
+    void t0;
   }
   history.replaceState(null, '', `#seed=${encodeURIComponent(world.seedText)}`);
 
@@ -76,25 +88,21 @@ async function boot() {
   });
   $('loading').style.display = 'none';
 
-  // Opening shot: the whole planet, slowly turning. If people already exist, begin at their first camp.
-  let spin = true;
+  // Opening shot: right beside the people, at living pace (one simulated minute per second).
+  let spin = !world.awakened;
   view.onUserMove = () => { spin = false; };
-  const first = world.activeSettlements()[0];
-  if (world.awakened && first) { view.rig.lon = lonOfX(first.x); view.rig.lat = latOfY(first.y); view.rig.alt = 40; spin = false; engine.setSpeed(SPEED.x10); }
-  else { view.rig.alt = 3900; engine.setSpeed(SPEED.x10k); }
-
-  // A one-time directorial nudge: when the first people wake, slow down and show them.
-  world.bus.on('AWAKENING', (e) => {
-    if (e.x === undefined || e.y === undefined) return;
-    if (!awakenShown) {
-      awakenShown = true;
-      engine.setSpeed(SPEED.x10);
-      spin = false;
-      view.flyToCell(e.x, e.y, 70, 0, 0.7);
-      ui.toast(e.text);
-    }
-  });
-  let awakenShown = world.awakened;
+  const first = world.activeSettlements().sort((a, b) => b.pop - a.pop)[0];
+  engine.setSpeed(SPEED.x1);
+  if (world.awakened && first) {
+    view.rig.lon = lonOfX(first.x);
+    view.rig.lat = latOfY(first.y);
+    view.rig.alt = 1.6;
+    view.rig.pitch = 0.95;
+    view.rig.yaw = 0.4;
+    spin = false;
+    const e = world.history.query({ type: 'AWAKENING', limit: 1 })[0];
+    if (e && !('cont' in choice)) ui.toast(`${formatYear(e.day)} — ${e.text}`);
+  } else view.rig.alt = 3900;
 
   // Seasons change the colour of the land: refresh periodically, and clouds with the weather.
   let lastColorDay = -1e9;

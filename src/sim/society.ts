@@ -7,6 +7,7 @@ import { Civ, Government, Settlement, stageFor } from './settlements';
 import { TECHS, TECH_IDS, TechId } from './technology';
 import { DAYS_PER_SEASON, DAYS_PER_YEAR, seasonOf, yearOf } from './time';
 import { NV, VALUE_KEYS } from './culture';
+import { economySeason } from './economy';
 
 const TECH_RATE = 0.35;
 const has = (s: Settlement, t: string) => (s.tech as Set<string>).has(t);
@@ -131,6 +132,7 @@ export function settlementSeason(w: World) {
     if (b.kind !== 'raiders' && w.day - b.created > 4 * DAYS_PER_YEAR) { b.created = w.day; bandStuck(w, b); }
   }
   const alive = w.activeSettlements();
+  for (const s of alive) economySeason(w, s);
   for (const s of alive) techSeason(w, s);
   diffuse(w, alive);
   for (const s of alive) { cultureDrift(w, s, alive); nomadMove(w, s); migrationCheck(w, s); aidNeighbours(w, s, alive); }
@@ -442,6 +444,7 @@ export function arriveBand(w: World, b: Band) {
     return;
   }
   const from = w.settlements[b.from - 1];
+  if (b.kind === 'army') { w.diplomacy.arrive(w, b, members, leader); return; }
   if (b.kind === 'raiders') { resolveRaid(w, b, members, leader); return; }
   const site = { x: leader.x, y: leader.y };
   // are we back home, or next to an existing settlement? then join it.
@@ -528,6 +531,7 @@ function resolveRaid(w: World, b: Band, members: Person[], leader: Person) {
   }
   target.threat = clamp(target.threat + 0.4);
   target.lastRaid = w.day;
+  { const home = w.settlements[b.from - 1]; if (home && home.civ !== target.civ) w.diplomacy.get(home.civ, target.civ).raids += 1; }
   target.defense += 0.02;
   for (const d of defenders) {
     if (!d.alive) continue;

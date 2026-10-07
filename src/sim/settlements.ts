@@ -1,4 +1,5 @@
 import type { TechSet } from './technology';
+import type { Stock } from './buildings';
 
 export type Stage = 'camp' | 'settlement' | 'village' | 'town' | 'city';
 export type Government =
@@ -19,6 +20,14 @@ export interface Settlement {
   food: number;
   goods: number;
   housing: number;
+  /** physical stockpile of materials */
+  res: Stock;
+  /** what the community currently lacks (0..1), drives who works at what */
+  need: Record<string, number>;
+  toolTier: number; // 0 bare hands, 1 stone, 2 metal
+  wealth: number;
+  range: number; // km people will range from the centre for materials
+  scarce: Record<string, number>; // day a lookup last failed, per kind
   nomadic: boolean;
   permanent: boolean;
   stage: Stage;

@@ -25,18 +25,33 @@ same planet, climate, rivers, resources and initial life; share the link under t
 1. **A planet with no people.** Life is seeded from the planet's climate: herbivores, carnivores and a social omnivore lineage.
    Traits (size, speed, strength, intelligence, eyesight, hearing, temperature tolerance, aggression, sociality) have costs and
    benefits; mutation and selection act every season; isolated populations drift until they speciate; species go extinct.
+   Trees evolve too: every region has a dominant tree species with its own generation time, wood yield and hardness, adapting
+   to local climate and splitting into daughter species. A comet or two cross the sky on real orbits, and very rarely an asteroid
+   strikes.
 2. **An awakening.** Nothing is scripted to be intelligent. When selection pushes a social omnivore population past an intelligence
-   and sociality threshold, that population becomes a band of individuals with persistent identities. (Several lineages can awaken
-   independently, far apart, and become unrelated peoples with unrelated languages.)
-3. **Lives.** Every person has a name, parents, children, partner, personality (13 traits), needs (hunger, thirst, shelter, safety,
-   social, belonging, status, curiosity …), skills, beliefs, memories and relationships. Behaviour is chosen from needs,
-   personality, environment and memory. Memories change people (a raid makes survivors fearful and vengeful).
-4. **Societies.** Camps become settlements, villages and towns. Population presses on land; famine, drought, epidemics and migration follow.
-   Some people reject their society (hermits, exiles, raiders, rebels, cult founders) and may found new peoples.
-   Cultures and languages drift apart when communities are isolated and split; technologies are *discovered* by creative people
-   under local pressure and resources, then spread (or not) through contact. Polities choose leaders, change government,
-   suffer coups, and collapse.
-5. **A history that writes itself.** Every important event goes through an event bus into a queryable chronicle, and carries
+   and sociality threshold, that population becomes a band of individuals with persistent identities, starting with *nothing*:
+   no tools, no houses, no stored food.
+3. **A physical world.** Resources are real places with real positions: groves (each tree takes years to regrow, depending on its
+   species), berry bushes, fishing waters, stone outcrops, clay pits, and copper/iron/coal/gold veins that must be *prospected*
+   before anyone can use them. People walk to a node, work there for hours (faster with better tools and skill), carry a load home
+   and deposit it. Hunters stalk the very same animals you see on screen. Farmers clear, plant, weed and harvest fields that
+   take a season to ripen and can fail in a drought. Metal needs a smithy, ore and fuel.
+4. **Lives, days and nights.** At the default ×1 pace one simulated minute passes per second (a day lasts 24 minutes). People sleep
+   at night in their own house (or in the open if they have none), work by day, eat from the common store, and have a personality
+   (13 traits), needs, skills, beliefs, memories and relationships. Memories change people.
+5. **Towns grow from need, skill and wealth.** The community decides what to build next from what it lacks and what it can afford:
+   huts, then timber, mud-brick and stone houses, granaries, kilns, workshops, smithies, wells, halls, markets, temples,
+   watchtowers. Buildings need materials in the stockpile and labour from builders; their placement is organic (a rosette around
+   the centre, fields further out), not a grid. Over-crowding, hunger or conflict make groups split away and found new towns.
+6. **Speech, trade and diplomacy.** People speak a language, learn each other's when they meet, and coin words for new things
+   (wood, field, iron …). Caravans carry surplus to neighbours that lack it, at prices set by scarcity; repeated trade between
+   peoples with different languages grows a **trade pidgin**. Tension between peoples builds from crowded borders, hunger, raids,
+   alien customs and ambitious rulers, and is eased by trade. When it is high and someone expects to win, a **war** can be
+   declared: armies march physically, battle, sack or conquer settlements, and refugees flee.
+7. **Societies and outcasts.** Cultures and languages drift apart when communities are isolated; technologies are *discovered* by
+   creative people under local pressure and resources, then spread through contact. Some people reject society (hermits, exiles,
+   raiders, rebels, cult founders) and may found new peoples. Polities choose leaders, change government, suffer coups and collapse.
+8. **A history that writes itself.** Every important event goes through an event bus into a queryable chronicle and carries
    *why it happened*.
 
 ## Observing
@@ -46,13 +61,13 @@ same planet, climate, rivers, resources and initial life; share the link under t
 | Drag / `WASD` | Pan across the globe |
 | Right-drag / `Q` `E` `T` `G` | Rotate and tilt |
 | Wheel / `R` `F` | Zoom from a person's shoulder (0.45 km) to the solar system |
-| Click | Inspect a person, settlement or animal |
-| `Space`, `[`, `]` | Pause, slower, faster (×0.1 … ×10,000) |
+| Click | Inspect a person, settlement, animal, tree/ore/stone node or building |
+| `Space`, `[`, `]` | Pause, slower, faster (×1 = one simulated minute per second … ×10M ≈ 19 years per second) |
 | **Jump** | Run 1 / 10 / 100 / 1,000 years forward |
 | `P` | Political map of peoples |
 | `1`–`9` / `Shift+1`–`9` | Go to / save camera bookmarks |
 | **Follow** (person panel) | Follow a life; *Follow descendants* continues with the eldest living child after death |
-| **Almanac** (`L`) | Chronicle, peoples & cultures, language family tree, tree of life, technology |
+| **Almanac** (`L`) | Chronicle, peoples & cultures, wars & tensions, language family tree, tree of life, technology |
 | `` ` `` or **Dev** | Developer dashboard (see below) |
 | `H` | Hide the interface |
 
@@ -101,17 +116,19 @@ log, an "inspect person by id" box, **export save** and a **replay check**.
 
 ## Honest status of this slice
 
-Implemented: Phases 1–3 fully, most of Phase 4 (culture, language, technology, civilization), and a first cut of Phase 5
-(politics, raids, migration). Not implemented — deliberately absent rather than faked:
+Implemented: Phases 1–3 fully, most of Phase 4 (culture, language, technology, civilization), a working first cut of Phase 5
+(diplomacy, war, raids, migration, trade) and the physical economy underneath. Not implemented — deliberately absent rather than faked:
 
-* Warfare between civilizations, diplomacy, conquest, and empires beyond a rank label; only outcast raiding and internal revolts exist.
-* Levels of detail *inside* the simulation. Every person is simulated individually (cost grows with population); settlement-level
-  aggregation for distant regions is the next architectural step. Simulation also runs on the main thread, not a Web Worker
-  (it is written so that it can move: it is pure state + `step(dt)`).
 * Technologies beyond engineering (electricity … spaceflight), aircraft, and any space program. Boats exist as a navigation
-  technology that permits crossing narrow water.
+  technology that permits crossing narrow water. Of the solar system there is the sun, a moon, comets and asteroid impacts — no other planets.
+* Levels of detail *inside* the simulation. Every person is simulated individually (cost grows with population and the engine
+  sheds backlog instead of freezing: the dashboard shows the achieved rate). Simulation runs on the main thread, not a Web Worker
+  (it is pure state + `step(dt)`, so it can move).
+* The terrain is still sampled from a 256×128 grid (a cell is ≈24 km); everything *on* it — resources, buildings, fields, people,
+  animals — has a continuous position, rendering warps cell lookups so biome edges wander, and the ground is a 12 km mesh with fine relief.
+  Close-up scenery is therefore still simple.
 * Marine life; ocean currents are visual only; caves exist as a terrain feature but have no gameplay effect yet.
-* Language "merging" and per-word grammar; languages split by sound change and carry a small sample lexicon.
-* Solar system: sun, the planet's day/night and axial-tilt seasons, and a moon — no other planets, comets or asteroids yet.
-* The world is a small "pocket" planet (radius 1,000 km) on a 256×128 simulation grid; one cell is ≈24 km at the equator.
-  Close-up scenery is therefore simple.
+* Language is modelled at the level of phonology, sound change, a growing lexicon, per-person fluency and contact languages;
+  there is no grammar generation beyond word order and morphology labels.
+* Wars are between peoples, not individual lords; sieges are single battles; there are no navies.
+* A restored save and a continuing world differ very slightly (a few runtime-only caches), but two restores of the same save stay identical.

@@ -6,10 +6,12 @@ import type { Settlement } from './settlements';
 import type { TechSet } from './technology';
 import { DAYS_PER_YEAR, seasonOf } from './time';
 import { NV } from './culture';
+import { runJob } from './jobs';
+import { isNight, localTime } from './time';
 
 export interface Band {
   id: number;
-  kind: 'migrants' | 'outcasts' | 'raiders';
+  kind: 'migrants' | 'outcasts' | 'raiders' | 'army';
   leader: number;
   tx: number;
   ty: number;
@@ -26,7 +28,6 @@ export interface Band {
   lastTarget?: number;
 }
 
-const WALK_CELLS_PER_DAY = 0.85;
 const SEASON_YIELD = [0.75, 1.15, 1.4, 0.3];
 
 export const cellOf = (p: Person) => idx(wrapX(Math.floor(p.x)), clamp(Math.floor(p.y), 0, H - 1));
@@ -40,36 +41,45 @@ function passable(w: World, x: number, y: number, boat: boolean): boolean {
   return w.planet.elev[i] < 4.8;
 }
 
-/** Greedy walk with obstacle sidestepping. Returns true on arrival. */
-export function walk(w: World, p: Person, tx: number, ty: number, cells: number, boat: boolean): boolean {
+/** Greedy walk with obstacle sidestepping, in kilometres. Returns true on arrival (within `tol` km). */
+export function walk(w: World, p: Person, tx: number, ty: number, km: number, boat: boolean, tol = 0.03): boolean {
   let guard = 0;
   const side = p.id % 2 === 0 ? 1 : -1;
-  while (cells > 1e-3 && guard++ < 60) {
-    const dx = wrapDx(p.x, tx);
-    const dy = ty - p.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist < 0.3) return true;
-    const step = Math.min(1, dist, cells);
-    let ang = Math.atan2(dy, dx);
+  const ky = KM_PER_CELL_Y;
+  while (km > 1e-5 && guard++ < 60) {
+    const kx = kmPerCellX(p.y);
+    const dxk = wrapDx(p.x, tx) * kx;
+    const dyk = (ty - p.y) * ky;
+    const dist = Math.hypot(dxk, dyk);
+    if (dist <= tol) return true;
+    const step = Math.min(dist, km, 8);
+    const ang = Math.atan2(dyk, dxk);
     let moved = false;
     for (let k = 0; k < 7 && !moved; k++) {
       const a = ang + side * ((k + 1) >> 1) * (k % 2 === 0 ? 1 : -1) * (Math.PI / 4);
-      const nx = p.x + Math.cos(a) * step;
-      const ny = p.y + Math.sin(a) * step;
+      const nx = p.x + (Math.cos(a) * step) / kx;
+      const ny = p.y + (Math.sin(a) * step) / ky;
       if (passable(w, nx, ny, boat)) {
         p.x = ((nx % W) + W) % W;
         p.y = ny;
         const e = w.planet.elev[idx(wrapX(Math.floor(p.x)), Math.floor(p.y))];
-        cells -= step * (1 + Math.max(0, e - 1.5) * 0.4);
+        km -= step * (1 + Math.max(0, e - 1.5) * 0.4);
         moved = true;
-        if (k > 0) p.stuck += 0.15;
-        else p.stuck = Math.max(0, p.stuck - 0.3);
+        if (k > 0) p.stuck += 0.03;
+        else p.stuck = Math.max(0, p.stuck - 0.1);
       }
     }
     if (!moved) { p.stuck += 1; return false; }
   }
-  return false;
+  const dx = wrapDx(p.x, tx) * kmPerCellX(p.y);
+  return Math.hypot(dx, (ty - p.y) * ky) <= tol;
 }
+
+/** Distance between a person and a point, in km. */
+export function kmTo(p: { x: number; y: number }, x: number, y: number): number {
+  return Math.hypot(wrapDx(p.x, x) * kmPerCellX(p.y), (y - p.y) * KM_PER_CELL_Y);
+}
+export const WALK_KMH = 4.5;
 
 // -------- site selection (used by migration, outcasts, founding) --------
 export function findSite(w: World, ox: number, oy: number, radiusKm: number, boat: boolean, fromComp: number, culture: number, avoidKm = 35): { x: number; y: number; score: number } | null {
@@ -157,7 +167,7 @@ function areKin(w: World, a: Person, b: Person): boolean {
 
 // -------- occupations --------
 export function assignOccupation(w: World, p: Person, s: Settlement | undefined) {
-  if (['hermit', 'exile', 'raider', 'wanderer', 'cult founder', 'rebel'].includes(p.occupation)) return;
+  if (['hermit', 'exile', 'raider', 'wanderer', 'cult founder', 'rebel', 'woodcutter', 'miner', 'builder', 'crafter', 'trader'].includes(p.occupation)) return; // flexible roles are balanced by the economy
   if (!s) { p.occupation = 'forager'; return; }
   const pe = p.personality;
   const sk = p.skills;
@@ -403,12 +413,23 @@ function decideGoal(w: World, p: Person, s: Settlement | undefined, dt: number, 
     if (b) {
       const L = w.people.get(b.leader);
       if (!L || !L.alive) b.leader = p.id;
-      p.goal = b.kind === 'raiders' ? 'raid' : b.kind === 'migrants' ? 'migrate' : 'wander';
+      p.goal = b.kind === 'army' ? 'attack' : b.kind === 'raiders' ? 'raid' : b.kind === 'migrants' ? 'migrate' : 'wander';
       return;
     }
     p.band = 0;
   }
   if (p.occupation === 'hermit') { p.goal = 'wander'; return; }
+  // at fine time steps people keep a daily rhythm: they sleep at night (in their house when they have one)
+  if (dt < 0.2 && s) {
+    const lt = localTime(day, p.x);
+    if (isNight(lt) && needs[ND.thirst] < 0.7 && needs[ND.hunger] < 0.85) {
+      if (p.goal !== 'rest') { p.hasTarget = false; if (p.phase === 2) p.phase = 1; }
+      p.goal = 'rest';
+      p.goalUntil = day + 0.01;
+      return;
+    }
+    if (p.goal === 'rest') { p.goal = 'work'; p.goalUntil = 0; p.hasTarget = false; }
+  }
   if (p.goalUntil > day && p.goal !== 'work' && needs[ND.thirst] < 0.6 && needs[ND.hunger] < 0.7) return;
   // crisis first: thirst, then hunger
   if (needs[ND.thirst] > 0.55 && w.planet.freshDist[cell] > 1) { p.goal = 'drink'; p.goalUntil = day + 1; return; }
@@ -429,21 +450,30 @@ function decideGoal(w: World, p: Person, s: Settlement | undefined, dt: number, 
 }
 
 function actOnGoal(w: World, p: Person, s: Settlement | undefined, dt: number, cell: number) {
-  const budget = WALK_CELLS_PER_DAY * dt;
+  const fine = dt < 0.2;
+  const budget = fine ? WALK_KMH * 24 * dt : 28 * dt; // km this step
   const rng = w.rng;
   const planet = w.planet;
   const boat = hasTech(s, 'navigation');
   switch (p.goal) {
+    case 'rest': {
+      const hb = p.house ? w.buildings.get(p.house) : undefined;
+      if (s) {
+        const hx = hb ? hb.x : s.x, hy = hb ? hb.y : s.y;
+        walk(w, p, hx, hy, budget, boat, 0.01);
+      }
+      break;
+    }
     case 'drink': {
       let bi = -1; let bd = planet.freshDist[cell];
       for (let k = 0; k < 8; k++) { const n = NBR8[cell * 8 + k]; if (n >= 0 && planet.freshDist[n] < bd && !planet.ocean[n]) { bd = planet.freshDist[n]; bi = n; } }
-      if (bi < 0 && s) { walk(w, p, s.x, s.y, budget, boat); break; }
+      if (bi < 0 && s) { walk(w, p, s.x, s.y, budget, boat, 0.05); break; }
       if (bi >= 0) walk(w, p, (bi % W) + 0.5, Math.floor(bi / W) + 0.5, budget, boat);
       else p.goal = 'wander';
       break;
     }
     case 'eat': {
-      if (s && s.food > 0.5) { walk(w, p, s.x, s.y, budget, boat); break; }
+      if (s && s.food > 0.5) { walk(w, p, s.x, s.y, budget, boat, 0.05); break; }
       // go to the richest neighbouring cell
       let bi = cell; let bv = w.env.forageAvailable(cell, w.day);
       for (let k = 0; k < 8; k++) { const n = NBR8[cell * 8 + k]; if (n < 0 || planet.ocean[n]) continue; const v = w.env.forageAvailable(n, w.day) + 1; if (v > bv) { bv = v; bi = n; } }
@@ -451,7 +481,7 @@ function actOnGoal(w: World, p: Person, s: Settlement | undefined, dt: number, c
       break;
     }
     case 'socialize': {
-      if (s) { const a = Math.abs(wrapDx(p.x, s.x)); if (a > 1.2) walk(w, p, s.x, s.y, budget, boat); else { p.x = wrapX(p.x + (rng.next() - 0.5) * 0.05); } }
+      if (s) { const a = Math.abs(wrapDx(p.x, s.x)); if (a > 0.05) walk(w, p, s.x, s.y, budget, boat, 0.1); else { p.x = wrapX(p.x + (rng.next() - 0.5) * 0.0006 * Math.min(1, dt * 20)); } }
       break;
     }
     case 'explore': {
@@ -462,7 +492,7 @@ function actOnGoal(w: World, p: Person, s: Settlement | undefined, dt: number, c
         p.ty = clamp(p.y + Math.sin(ang) * d, 1, H - 2);
         p.hasTarget = true;
       }
-      const arrived = walk(w, p, p.tx, p.ty, budget, boat);
+      const arrived = walk(w, p, p.tx, p.ty, budget, boat, 2);
       if (s) {
         const dk = distKm(p.x, p.y, s.x, s.y);
         if (dk > s.knownKm) s.knownKm = dk + 15;
@@ -483,11 +513,12 @@ function actOnGoal(w: World, p: Person, s: Settlement | undefined, dt: number, c
     }
     case 'migrate':
     case 'wander':
+    case 'attack':
     case 'raid': {
       const b = w.bands.get(p.band);
       if (p.occupation === 'hermit' || !b) { wanderAbout(w, p, budget); break; }
       const tx = b.tx; const ty = b.ty;
-      const arrived = walk(w, p, tx, ty, budget, boat || hasTech(w.settlements[b.from - 1], 'navigation'));
+      const arrived = walk(w, p, tx, ty, budget, boat || hasTech(w.settlements[b.from - 1], 'navigation'), 1.5);
       // travellers carry a ration and forage on the way
       if (p.food < 1) p.food += w.env.takeForage(cell, 1.2 * dt, w.day) * 0.6;
       if (p.id === b.leader) {
@@ -511,106 +542,61 @@ function wanderAbout(w: World, p: Person, budget: number) {
     p.ty = clamp(p.y + Math.sin(ang) * d, 1, H - 2);
     p.hasTarget = true; p.stuck = 0;
   }
-  if (walk(w, p, p.tx, p.ty, budget, false)) p.hasTarget = false;
+  if (walk(w, p, p.tx, p.ty, budget, false, 1)) p.hasTarget = false;
   // hermits and wanderers live off the land
   const cell = cellOf(p);
   const got = w.env.takeForage(cell, 1.2, w.day);
   if (p.food < 3) p.food += got * 0.5;
 }
 
+const JOB_ROLES = new Set<string>(['forager', 'hunter', 'farmer', 'woodcutter', 'miner', 'builder', 'crafter', 'trader', 'explorer']);
+
 function work(w: World, p: Person, s: Settlement | undefined, dt: number, cell: number, budget: number, boat: boolean) {
   const planet = w.planet;
   const rng = w.rng;
   if (!s) { wanderAbout(w, p, budget); return; }
-  const dHome = Math.hypot(wrapDx(p.x, s.x), p.y - s.y);
-  if (dHome > 7) { walk(w, p, s.x, s.y, budget, boat); return; }
+  const fine = dt < 0.2;
+  if (kmTo(p, s.x, s.y) > 160) { walk(w, p, s.x, s.y, budget, boat, 0.2); return; }
+  const occ = p.occupation;
+  if (JOB_ROLES.has(occ) && runJob(w, p, s, dt, fine)) return;
   const sk = p.skills;
-  const mult = (0.7 + 0.8 * sk[SK.foraging]) * (hasTech(s, 'tools') ? 1.25 : 1) * (hasTech(s, 'metallurgy') ? 1.1 : 1);
-  const radius = 1.2 + s.stress * 3.5 + (s.stage === 'camp' ? 0 : 0.8) + (p.occupation === 'farmer' ? Math.sqrt(s.pop) * 0.35 : 0);
-  let produced = 0;
-  const pickCell = (preferGood: boolean) => {
-    let bi = -1; let bv = -1;
-    for (let t = 0; t < 5; t++) {
-      const a = rng.next() * Math.PI * 2;
-      const r = rng.next() * radius;
-      const x = wrapX(Math.floor(s.x + Math.cos(a) * r));
-      const y = Math.floor(clamp(s.y + Math.sin(a) * r, 0, H - 1));
-      const i = idx(x, y);
-      if (planet.ocean[i] && !(p.occupation === 'forager' && planet.coastDist[i] === 0 && false)) continue;
-      const v = preferGood ? w.env.forageAvailable(i, w.day) : w.env.fert[i] * (1 + (planet.freshDist[i] <= 1 ? 0.5 : 0)) * (1 / (1 + 1.5 * (w.farmLoad.get(i) ?? 0)));
-      if (v > bv) { bv = v; bi = i; }
-    }
-    return bi;
-  };
-  switch (p.occupation) {
-    case 'forager':
-    case 'hunter':
-    case 'farmer': {
-      const farmer = p.occupation === 'farmer' && hasTech(s, 'agriculture');
-      if (p.workCell < 0 || (!farmer && w.env.forageAvailable(p.workCell, w.day) < 0.5) || rng.chance(0.05 * dt)) p.workCell = pickCell(!farmer);
-      if (p.workCell < 0) break;
-      const tx = (p.workCell % W) + 0.5; const ty = Math.floor(p.workCell / W) + 0.5;
-      const arrived = walk(w, p, tx, ty, budget, boat) || Math.hypot(wrapDx(p.x, tx), p.y - ty) < 0.8;
-      const frac = arrived ? 0.85 : 0.2;
-      if (farmer) {
-        const load = (w.farmLoad.get(p.workCell) ?? 0) + 1;
-        w.farmLoad.set(p.workCell, load);
-        const f = w.env.fert[p.workCell];
-        const reg = regionOfCell(p.workCell % W, Math.floor(p.workCell / W));
-        const rain = clamp(Math.pow(w.env.anomaly[reg], 1.2), 0.1, 1.3);
-        let y = 3.3 * (0.35 + f) * SEASON_YIELD[seasonOf(w.day)] * rain * (0.7 + 0.7 * sk[SK.farming]);
-        if (hasTech(s, 'tools')) y *= 1.15;
-        if (hasTech(s, 'metallurgy')) y *= 1.15;
-        if (hasTech(s, 'mathematics')) y *= 1.15;
-        if (hasTech(s, 'engineering')) y *= 1.25;
-        if (load > 3) y *= 0.3;
-        produced = y * dt * frac;
-        w.env.cultivated[p.workCell] = 1;
-        w.env.fert[p.workCell] = clamp(w.env.fert[p.workCell] - (load > 3 ? 0.0004 : 0.00002) * dt);
-        sk[SK.farming] = Math.min(1, sk[SK.farming] + dt * 0.0009 * (0.5 + p.personality[P.intelligence]));
-      } else if (p.occupation === 'hunter') {
-        const reg = regionOfCell(p.workCell % W, Math.floor(p.workCell / W));
-        const want = 3.2 * mult * dt * frac * (0.6 + 0.8 * sk[SK.hunting]);
-        let got = w.eco.hunt(reg, want);
-        // forage a little when the hunt fails
-        if (got < want * 0.3) got += w.env.takeForage(p.workCell, 0.8 * dt * frac, w.day);
-        produced = got;
-        sk[SK.hunting] = Math.min(1, sk[SK.hunting] + dt * 0.0009 * (0.5 + p.personality[P.intelligence]));
-        if (rng.next() < 0.0004 * dt * (1 - sk[SK.hunting] * 0.5)) p.health = clamp(p.health - 0.25);
-      } else {
-        produced = w.env.takeForage(p.workCell, 2.6 * mult * dt * frac, w.day);
+  // work done by hand-picked wild foods when there is no specific job to do
+  const dayScale = fine ? 1.75 : 1;
+  const mult = (0.7 + 0.8 * sk[SK.foraging]) * (s.toolTier >= 1 ? 1.25 : 1);
+  const radius = 1.2 + s.stress * 3.5 + (s.stage === 'camp' ? 0 : 0.8);
+  const forage = () => {
+    if (p.workCell < 0 || w.env.forageAvailable(p.workCell, w.day) < 0.5 || rng.chance(0.05 * Math.min(dt, 5))) {
+      let bi = -1; let bv = -1;
+      for (let t = 0; t < 5; t++) {
+        const a = rng.next() * Math.PI * 2;
+        const r = rng.next() * radius;
+        const x = wrapX(Math.floor(s.x + Math.cos(a) * r));
+        const y = Math.floor(clamp(s.y + Math.sin(a) * r, 0, H - 1));
+        const i = idx(x, y);
+        if (planet.ocean[i]) continue;
+        const v = w.env.forageAvailable(i, w.day);
+        if (v > bv) { bv = v; bi = i; }
       }
-      s.food += produced;
-      s.produced += produced;
-      break;
+      p.workCell = bi;
     }
-    case 'crafter': {
-      const st = planet.res.stone[idx(wrapX(Math.floor(s.x)), Math.floor(s.y))] / 255;
-      s.goods += dt * 0.5 * (0.5 + sk[SK.crafting]) * (0.5 + st);
-      sk[SK.crafting] = Math.min(1, sk[SK.crafting] + dt * 0.001);
-      idleAround(w, p, s, budget);
-      supplemental(w, p, s, dt, 0.8);
+    if (p.workCell < 0) return;
+    const tx = (p.workCell % W) + 0.5; const ty = Math.floor(p.workCell / W) + 0.5;
+    const arrived = walk(w, p, tx, ty, budget, boat, 6) ;
+    const frac = arrived ? 0.85 : 0.2;
+    const got = w.env.takeForage(p.workCell, 2.6 * mult * dt * frac * dayScale, w.day);
+    s.food += got;
+    s.produced += got;
+  };
+  switch (occ) {
+    case 'forager': case 'hunter': case 'farmer': case 'woodcutter': case 'miner': case 'builder': case 'crafter': case 'trader': case 'explorer':
+      forage();
       break;
-    }
-    case 'builder': {
-      if (s.goods > 2) { s.goods -= dt * 0.12; s.housing += dt * 0.2 * (0.5 + sk[SK.building]) * (hasTech(s, 'architecture') ? 1.8 : 1); }
-      sk[SK.building] = Math.min(1, sk[SK.building] + dt * 0.001);
-      idleAround(w, p, s, budget);
-      supplemental(w, p, s, dt, 0.8);
-      break;
-    }
-    case 'healer': sk[SK.healing] = Math.min(1, sk[SK.healing] + dt * 0.001); idleAround(w, p, s, budget); supplemental(w, p, s, dt, 0.7); break;
-    case 'leader': sk[SK.leading] = Math.min(1, sk[SK.leading] + dt * 0.001); s.cohesion = clamp(s.cohesion + dt * 0.0005); idleAround(w, p, s, budget); supplemental(w, p, s, dt, 0.7); break;
-    case 'priest': s.cohesion = clamp(s.cohesion + dt * 0.0004); idleAround(w, p, s, budget); supplemental(w, p, s, dt, 0.7); break;
-    case 'warrior': s.defense += dt * 0.00002; idleAround(w, p, s, budget); supplemental(w, p, s, dt, 0.8); break;
-    case 'explorer': {
-      if (rng.next() < 0.1 * dt) { p.goal = 'explore'; p.goalUntil = w.day + 15; p.hasTarget = false; }
-      idleAround(w, p, s, budget);
-      supplemental(w, p, s, dt, 0.8);
-      break;
-    }
-    case 'scholar': idleAround(w, p, s, budget); supplemental(w, p, s, dt, 0.5); break;
-    default: idleAround(w, p, s, budget); supplemental(w, p, s, dt, 1);
+    case 'healer': sk[SK.healing] = Math.min(1, sk[SK.healing] + dt * 0.001); idleAround(w, p, s, budget); supplemental(w, p, s, dt * dayScale, 0.7); break;
+    case 'leader': sk[SK.leading] = Math.min(1, sk[SK.leading] + dt * 0.001); s.cohesion = clamp(s.cohesion + dt * 0.0005); idleAround(w, p, s, budget); supplemental(w, p, s, dt * dayScale, 0.7); break;
+    case 'priest': s.cohesion = clamp(s.cohesion + dt * 0.0004); idleAround(w, p, s, budget); supplemental(w, p, s, dt * dayScale, 0.7); break;
+    case 'warrior': s.defense += dt * 0.00002; idleAround(w, p, s, budget); supplemental(w, p, s, dt * dayScale, 0.8); break;
+    case 'scholar': idleAround(w, p, s, budget); supplemental(w, p, s, dt * dayScale, 0.5); break;
+    default: idleAround(w, p, s, budget); supplemental(w, p, s, dt * dayScale, 1);
   }
 }
 
@@ -623,16 +609,14 @@ function supplemental(w: World, p: Person, s: Settlement, dt: number, frac: numb
 }
 
 function idleAround(w: World, p: Person, s: Settlement, budget: number) {
-  // people loiter within the built-up area (a few hundred metres to a few km), not across the whole 24 km cell
-  const R = 0.03 + 0.012 * Math.sqrt(s.pop);
-  const dx = wrapDx(p.x, s.x);
-  const dy = p.y - s.y;
-  if (!p.hasTarget || Math.hypot(dx, dy) > R * 2.5) {
+  // people loiter within the built-up area, a few hundred metres to a couple of km
+  const Rkm = 0.08 + 0.02 * Math.sqrt(s.pop);
+  if (!p.hasTarget || kmTo(p, s.x, s.y) > Rkm * 2.5) {
     const a = w.rng.next() * Math.PI * 2;
-    const r = Math.sqrt(w.rng.next()) * R;
-    p.tx = s.x + Math.cos(a) * r;
-    p.ty = clamp(s.y + Math.sin(a) * r, 0, H - 1);
+    const r = Math.sqrt(w.rng.next()) * Rkm;
+    p.tx = s.x + (Math.cos(a) * r) / kmPerCellX(s.y);
+    p.ty = clamp(s.y + (Math.sin(a) * r) / KM_PER_CELL_Y, 0, H - 1);
     p.hasTarget = true;
   }
-  if (walk(w, p, p.tx, p.ty, Math.min(budget, 0.4), false)) p.hasTarget = false;
+  if (walk(w, p, p.tx, p.ty, Math.min(budget, 1.5), false, 0.02)) p.hasTarget = false;
 }

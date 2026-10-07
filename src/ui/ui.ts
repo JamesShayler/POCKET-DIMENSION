@@ -1,12 +1,16 @@
 import type { World } from '../sim/world';
 import type { Engine } from '../engine';
-import { SPEEDS, SPEED_LABELS, SPEED } from '../engine';
+import { SPEEDS, SPEED_LABELS, SPEED_HINT, SPEED } from '../engine';
 import type { ObserverView, Bookmark } from '../render/observer';
 import { BIOME_NAMES } from '../sim/planet';
 import { NEEDS, PERSONALITY, SKILLS, Person } from '../sim/people';
 import { VALUE_KEYS } from '../sim/culture';
 import { TECHS, TECH_IDS } from '../sim/technology';
-import { SEASON_NAMES, dayOfYear, formatYear, seasonOf, yearOf } from '../sim/time';
+import { SEASON_NAMES, clockText, dayOfYear, formatYear, seasonOf, yearOf } from '../sim/time';
+import { BDEFS } from '../sim/buildings';
+import { RES_KEYS } from '../sim/buildings';
+import { fieldYield, GROW_DAYS } from '../sim/jobs';
+import { lonOfX } from '../sim/grid';
 import { W, H, cellLat, distKm, idx, wrapX } from '../sim/grid';
 import { cellOf } from '../sim/behavior';
 import type { SimEvent, EventType } from '../sim/events';
@@ -29,7 +33,7 @@ const bar10 = (v: number) => {
 const cap = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
 const num = (n: number) => Math.round(n).toLocaleString('en-US');
 
-type Sel = { kind: 'person' | 'settlement' | 'civ' | 'species' | 'culture'; id: number } | null;
+type Sel = { kind: 'person' | 'settlement' | 'civ' | 'species' | 'culture' | 'node' | 'building'; id: number; extra?: number } | null;
 
 export class UI {
   private el = (id: string) => document.getElementById(id)!;
@@ -59,7 +63,9 @@ export class UI {
     });
     ctx.view.onPick = (p) => {
       if (!p) { this.clearSelection(); return; }
-      this.select(p.kind === 'animal' ? 'species' : (p.kind as 'person' | 'settlement'), p.id, true);
+      if (p.kind === 'node') this.select('node', p.id, false, p.extra);
+      else if (p.kind === 'building') this.select('building', p.id, false);
+      else this.select(p.kind === 'animal' ? 'species' : (p.kind as 'person' | 'settlement'), p.id, true);
     };
     document.addEventListener('click', (e) => this.delegate(e));
     window.addEventListener('keydown', (e) => this.key(e));
@@ -70,7 +76,7 @@ export class UI {
   // ---------------------------------------------------------------- top bar & controls
   private buildBar() {
     const bar = this.el('bar');
-    const sp = SPEEDS.map((s, i) => `<button data-speed="${i}" title="${i ? s.toLocaleString() + ' days per second' : 'Pause'}">${SPEED_LABELS[i]}</button>`).join('');
+    const sp = SPEEDS.map((s, i) => `<button data-speed="${i}" title="${SPEED_HINT[i]}">${SPEED_LABELS[i]}</button>`).join('');
     bar.innerHTML = `${sp}<span class="sep"></span><span class="eff" id="eff"></span><span class="sep"></span>
       <button data-act="jump">Jump ▴</button><button data-act="politics" id="b-pol">Borders</button><button data-act="almanac">Almanac</button><button data-act="dev">Dev</button><button data-act="save">Save</button><button data-act="new">New</button>
       <div id="jump" class="glass"><button data-jump="1">+1 year</button><button data-jump="10">+10 years</button><button data-jump="100">+100 years</button><button data-jump="1000">+1,000 years</button></div>`;
@@ -82,10 +88,12 @@ export class UI {
     const rd = e.renderDay;
     const season = SEASON_NAMES[seasonOf(rd)];
     const dd = dayOfYear(rd);
+    const camX = ((view.rig.lon + Math.PI) / (Math.PI * 2)) * 256;
+    const clock = clockText(rd, camX);
     const pop = w.alive.length;
     const sets = w.activeSettlements().length;
     this.el('top').innerHTML = `<div class="title">Pocket Dimension</div><div class="year">${formatYear(w.day)}</div>
-      <div class="sub">${season} · day ${Math.floor(dd) + 1} · <b>${num(pop)}</b> people · <b>${sets}</b> settlements · <b>${w.livingCivs().length}</b> peoples</div>
+      <div class="sub">${season} · day ${Math.floor(dd) + 1} · <b>${clock}</b> local · <b>${num(pop)}</b> people · <b>${sets}</b> settlements · <b>${w.livingCivs().length}</b> peoples</div>
       <div class="sub">seed <button class="link" data-act="copyseed" title="Copy a link to this universe">${esc(w.seedText)}</button>${w.awakened ? '' : ' · <span style="color:var(--warm)">life is still waking…</span>'}</div>`;
     SPEEDS.forEach((_, i) => {
       const b = this.el('bar').querySelector(`[data-speed="${i}"]`);
@@ -153,10 +161,10 @@ export class UI {
     this.ctx.view.entities.selected = null;
     this.el('panel').classList.remove('open');
   }
-  select(kind: 'person' | 'settlement' | 'civ' | 'species' | 'culture', id: number, fly = false) {
+  select(kind: 'person' | 'settlement' | 'civ' | 'species' | 'culture' | 'node' | 'building', id: number, fly = false, extra?: number) {
     const { view, world: w } = this.ctx;
-    this.sel = { kind, id };
-    view.entities.selected = kind === 'person' || kind === 'settlement' ? { kind, id } : null;
+    this.sel = { kind, id, extra };
+    view.entities.selected = ['person', 'settlement', 'node', 'building'].includes(kind) ? { kind, id, extra } : null;
     if (fly) {
       if (kind === 'person') view.setFollow({ kind: 'person', id }, Math.min(view.rig.alt, 6));
       else if (kind === 'settlement') { view.setFollow({ kind: 'settlement', id }, Math.min(Math.max(view.rig.alt, 20), 60)); }
@@ -196,6 +204,8 @@ export class UI {
       case 'civ': html = this.civHtml(this.sel.id); break;
       case 'species': html = this.speciesHtml(this.sel.id); break;
       case 'culture': html = this.cultureHtml(this.sel.id); break;
+      case 'node': html = this.nodeHtml(this.sel.id, this.sel.extra ?? 0); break;
+      case 'building': html = this.buildingHtml(this.sel.id); break;
     }
     if (html === this.lastPanelHtml) return;
     const top = p.scrollTop;
@@ -220,21 +230,41 @@ export class UI {
     const w = this.ctx.world;
     const s = p.home ? w.settlements[p.home - 1] : undefined;
     const band = p.band ? w.bands.get(p.band) : undefined;
+    const carry = p.cargoAmt > 0.5 ? ` Carrying ${Math.round(p.cargoAmt)} ${p.cargo === 'food' ? 'food' : p.cargo}.` : '';
     switch (p.goal) {
+      case 'rest': return `Sleeping${p.house ? ' in their house' : ' under the stars'}${s ? ' in ' + s.name : ''}.`;
       case 'drink': return 'Searching for water';
       case 'eat': return 'Searching for food';
       case 'socialize': return `Spending time with others${s ? ' in ' + s.name : ''}`;
       case 'explore': return 'Exploring beyond the known lands';
       case 'migrate': return band ? `Travelling with ${band.members.length} others toward new land (${band.note})` : 'Travelling';
       case 'raid': return 'Raiding with a band of outcasts';
+      case 'attack': return band && band.returning ? 'Marching home from the war.' : 'Marching to war.';
       case 'wander': return p.occupation === 'hermit' ? 'Living alone, apart from society' : band ? `Wandering with ${band.members.length - 1} followers (${band.note})` : 'Wandering alone';
-      default:
+      default: {
+        const nodeName = () => { const n = p.tcell >= 0 ? w.res.nodes(p.tcell)[p.tslot] : undefined; return n ? n.kind : 'a resource'; };
+        const ph = p.phase === 1 ? 'Walking out to' : p.phase === 3 ? 'Hauling home from' : 'Working at';
+        switch (p.task) {
+          case 'chop': return `${ph} a grove to fell trees.${carry}`;
+          case 'quarry': return `${ph} the quarry for stone.${carry}`;
+          case 'mine': return `${ph} the ${nodeName()} diggings.${carry}`;
+          case 'clay': return `${ph} the clay pit.${carry}`;
+          case 'berry': return `${ph} the berry bushes.${carry}`;
+          case 'fish': return `${ph} the fishing waters.${carry}`;
+          case 'hunt': return p.phase === 1 ? 'Stalking game.' : p.phase === 2 ? 'Closing in on an animal.' : `Carrying the kill home.${carry}`;
+          case 'field': return p.tslot === 3 ? 'Harvesting a field.' : p.tslot === 2 ? 'Weeding a field.' : 'Planting a field.';
+          case 'build': { const b = w.buildings.get(p.tb); return `Building a ${b ? BDEFS[b.kind].name.toLowerCase() : 'structure'}${b ? ` (${Math.round(b.progress * 100)}%)` : ''}.`; }
+          case 'craft': return 'Crafting goods at the workshop.';
+          case 'trade': { const o = w.settlements[p.tb - 1]; return p.phase === 3 ? `Returning from ${o?.name ?? 'afar'} with ${p.cargoAmt > 0.5 ? Math.round(p.cargoAmt) + ' ' + p.cargo : 'little'}.` : `Leading a caravan to ${o?.name ?? 'a distant town'} with ${Math.round(p.cargoAmt)} ${p.cargo}.`; }
+          case 'prospect': return 'Prospecting the hills for ore and clay.';
+        }
         if (p.occupation === 'farmer') return `Tending fields near ${s?.name ?? 'home'}`;
         if (p.occupation === 'hunter') return 'Hunting game';
-        if (p.occupation === 'forager') return 'Gathering food';
+        if (p.occupation === 'forager') return 'Gathering wild food';
         if (p.occupation === 'leader') return `Leading ${s?.name ?? 'the community'}`;
         if (p.occupation === 'child') return 'Growing up';
         return `Working as a ${p.occupation}`;
+      }
     }
   }
 
@@ -268,6 +298,8 @@ export class UI {
     parts.push(`<div style="color:var(--dim);margin-bottom:8px">${p.alive ? '' : `<span class="neg">Died in ${formatYear(p.death)} of ${esc(p.deathCause)} · </span>`}${cap(p.occupation)}${s ? ' of ' + this.link('settlement', s.id, s.name) : ''}</div>`);
     parts.push(`<div class="kv"><span>Name</span><span>${esc(p.name)}</span><span>Age</span><span>${age} · ${p.sex ? 'female' : 'male'}${p.pregnantUntil >= 0 ? ' · expecting' : ''} · born ${yearOf(p.birth).toLocaleString()}</span>
       <span>Species</span><span>${esc(sp?.name ?? '?')}</span><span>Culture</span><span>${cul ? this.link('culture', cul.id, 'The ' + cul.name) : '—'}${lang ? ` · speaks ${esc(lang.name)}` : ''}</span>
+      <span>Speaks</span><span>${esc(w.langs.get(p.tongue)?.name ?? '—')}${[...p.fluency].filter(([, f]) => f > 0.15).map(([id, f]) => `, ${esc(w.langs.get(id)?.name ?? '?')} (${f > 0.7 ? 'fluent' : f > 0.4 ? 'conversational' : 'a few words'})`).join('')}</span>
+      <span>Local time</span><span>${clockText(w.day, p.x)}</span>
       <span>Location</span><span>${this.lat(p.y)} ${this.lon(p.x)} · ${esc(biome)}${nb ? ` · ${Math.round(nb.d)} km from ${this.link('settlement', nb.id, nb.name)}` : ''}</span>
       <span>Health</span><span>${Math.round(p.health * 100)}%</span><span>Status</span><span>${bar10(p.status)}</span></div>`);
     parts.push('<h3>Personality</h3>');
@@ -331,6 +363,14 @@ export class UI {
     parts.push('<h3>Condition</h3>');
     parts.push(this.barRow('Food stress', s.stress) + this.barRow('Cohesion', s.cohesion) + this.barRow('Threat', s.threat));
     parts.push(`<div style="color:var(--dim);margin-top:4px">Food store ${num(s.food)} · goods ${num(s.goods)} · housing ${num(s.housing)}${s.diseaseUntil > w.day ? ' · <span class="neg">epidemic</span>' : ''}</div>`);
+    {
+      const blds: Record<string, number> = {};
+      let under = 0;
+      for (const b of w.buildings.of(s.id)) { if (b.done >= 0) blds[b.kind] = (blds[b.kind] ?? 0) + 1; else if (b.progress < 1) under++; }
+      parts.push('<h3>Stockpile</h3>' + `<div class="kv"><span>Food</span><span>${num(s.food)}</span>${RES_KEYS.map((k) => `<span>${k}</span><span>${num(s.res[k])}</span>`).join('')}<span>Goods</span><span>${num(s.goods)}</span><span>Wealth</span><span>${num(s.wealth)}</span><span>Tools</span><span>${['bare hands', 'stone tools', 'metal tools'][s.toolTier]}</span><span>Gathers within</span><span>${s.range.toFixed(0)} km</span></div>`);
+      parts.push('<h3>Needs</h3>' + ['wood', 'stone', 'clay', 'ore', 'coal'].filter((k) => (s.need[k] ?? 0) > 0.02).map((k) => this.barRow(cap(k), s.need[k])).join('') || '<span style="color:var(--dim)">Nothing pressing.</span>');
+      parts.push('<h3>Buildings</h3>' + (Object.entries(blds).map(([k, v]) => `<span class="chip on">${v} ${BDEFS[k as keyof typeof BDEFS].name.toLowerCase()}${v > 1 && !k.endsWith('s') ? 's' : ''}</span>`).join('') || '<span style="color:var(--dim)">Nothing built yet — they sleep in the open.</span>') + (under ? ` <span class="chip">${under} being built</span>` : '') + `<div style="color:var(--dim)">Housing ${s.housing} for ${s.pop} people</div>`);
+    }
     parts.push('<h3>Technology</h3>' + ([...s.tech].map((t) => `<span class="chip on">${esc(TECHS[t].name)}</span>`).join('') || '<span style="color:var(--dim)">None yet.</span>'));
     parts.push('<h3>Occupations</h3>' + Object.entries(s.occupations).sort((a, b) => b[1] - a[1]).map(([k, v]) => `<span class="chip">${esc(k)} ${v}</span>`).join(''));
     parts.push(`<h3>Origin</h3><div style="color:var(--dim)">${esc(s.originNote)}</div>`);
@@ -395,10 +435,12 @@ export class UI {
       if (c2) rel.push({ civ: o, d: distKm(cap1.x, cap1.y, c2.x, c2.y) });
     }
     rel.sort((a, b) => a.d - b.d);
-    parts.push('<h3>Relations</h3>' + (rel.length ? rel.slice(0, 5).map((r) => {
+    parts.push('<h3>Relations</h3>' + (rel.length ? rel.slice(0, 6).map((r) => {
       const oc = w.cultures.get(r.civ.culture);
       const dist = cul && oc ? w.cultures.distance(cul, oc) : 0;
-      return `<div>${this.link('civ', r.civ.id, 'The ' + r.civ.name)} <span style="color:var(--dim)">${Math.round(r.d)} km · ${dist < 0.25 ? 'kindred' : dist < 0.5 ? 'distinct' : 'foreign'} culture · pop ${num(r.civ.pop)}</span></div>`;
+      const dr = w.diplomacy.rel.get(`${Math.min(id, r.civ.id)}:${Math.max(id, r.civ.id)}`);
+      const mood = dr ? (dr.war ? '<span class="neg">AT WAR</span>' : dr.tension > 0.6 ? '<span class="neg">hostile</span>' : dr.trade > 0.5 ? '<span class="pos">trading partners</span>' : dr.tension > 0.35 ? 'wary' : 'calm') + ` (tension ${dr.tension.toFixed(2)})` : 'no dealings';
+      return `<div>${this.link('civ', r.civ.id, 'The ' + r.civ.name)} <span style="color:var(--dim)">${Math.round(r.d)} km · ${dist < 0.25 ? 'kindred' : dist < 0.5 ? 'distinct' : 'foreign'} culture · pop ${num(r.civ.pop)} · </span>${mood}</div>`;
     }).join('') : '<span style="color:var(--dim)">No contact.</span>'));
     parts.push(`<div class="row"><button class="btn" data-act="follow-civ" data-civ="${id}">Follow</button></div>`);
     return parts.join('');
@@ -443,6 +485,44 @@ export class UI {
     return parts.join('');
   }
 
+  nodeHtml(cell: number, slot: number): string {
+    const { world: w } = this.ctx;
+    const n = w.res.nodes(cell)[slot];
+    if (!n) return '<h2>Unknown</h2>';
+    const amt = w.res.amount(cell, slot, w.day);
+    const reg = Math.floor(Math.floor(n.y) / 4) * 64 + Math.floor(Math.floor(n.x) / 4);
+    const names: Record<string, string> = { tree: 'Grove', bush: 'Berry bushes', stone: 'Stone outcrop', clay: 'Clay pit', fish: 'Fishing waters', copper: 'Copper vein', iron: 'Iron vein', coal: 'Coal seam', gold: 'Gold vein' };
+    const parts: string[] = [`<h2>${names[n.kind]}</h2><div style="color:var(--dim)">${this.lat(n.y)} ${this.lon(n.x)} · ${esc(BIOME_NAMES[w.planet.biome[cell]])}</div>`];
+    const finite = ['stone', 'copper', 'iron', 'coal', 'gold'].includes(n.kind);
+    parts.push('<h3>Resource</h3>' + this.barRow(finite ? 'Remaining' : 'Standing', amt / n.max));
+    if (n.kind === 'tree') {
+      const sp = w.flora.at(reg);
+      parts.push(`<div class="kv" style="margin-top:6px"><span>Species</span><span>${esc(sp.name)}</span><span>Trees</span><span>${Math.round(amt)} of ${n.max}</span><span>Wood per tree</span><span>${sp.wood.toFixed(1)}</span>
+        <span>Regrows in</span><span>${sp.growYears.toFixed(0)} years (its generation time)</span><span>Hardness</span><span>${Math.round(sp.hardness * 10)}/10</span><span>Ancestor</span><span>${sp.parent ? esc(w.flora.species[sp.parent - 1].name) : 'founder species'}</span></div>`);
+    } else parts.push(`<div class="kv" style="margin-top:6px"><span>Amount</span><span>${Math.round(amt)} of ${n.max}</span><span>Renews</span><span>${finite ? 'never — once mined it is gone' : n.kind === 'bush' ? 'each year' : n.kind === 'fish' ? 'as the fish breed (months)' : 'over decades'}</span></div>`);
+    const known = ['copper', 'iron', 'coal', 'gold', 'clay'].includes(n.kind) ? [...w.res.known.entries()].filter(([, set]) => set.has(cell * 64 + slot)).map(([sid]) => w.settlements[sid - 1]?.name).filter(Boolean) : null;
+    if (known) parts.push(`<h3>Prospected by</h3><div style="color:var(--dim)">${known.length ? esc(known.slice(0, 6).join(', ')) : 'nobody yet'}</div>`);
+    return parts.join('');
+  }
+
+  buildingHtml(id: number): string {
+    const { world: w } = this.ctx;
+    const b = w.buildings.get(id);
+    if (!b) return '<h2>Unknown</h2>';
+    const def = BDEFS[b.kind];
+    const s = w.settlements[b.sid - 1];
+    const parts: string[] = [`<h2>${def.name}</h2><div style="color:var(--dim)">${s ? this.link('settlement', s.id, s.name) : ''} · ${b.done >= 0 ? 'built ' + formatYear(b.done) : b.done === -2 ? 'ruined' : `under construction ${Math.round(b.progress * 100)}%`}</div>`];
+    if (b.kind === 'field') {
+      const state = b.fstate === 0 ? 'fallow, ready for planting' : b.fstate === 2 ? 'ripe — waiting for harvest' : `growing (${Math.round(Math.min(1, (w.day - b.planted) / GROW_DAYS) * 100)}%)`;
+      parts.push(`<h3>Crop</h3><div>${state}</div>${this.barRow('Weeds', b.weeds)}`);
+    } else {
+      parts.push(`<div class="kv" style="margin-top:8px"><span>Housing</span><span>${def.cap ? `${b.residents} of ${def.cap} residents` : '—'}</span><span>Cost</span><span>${Object.entries(def.cost).map(([k, v]) => `${v} ${k}`).join(', ') || '—'}</span><span>Labour</span><span>${def.labor} person-hours</span></div>`);
+      const who = (w.residents.get(b.sid) ?? []).filter((p) => p.house === id).slice(0, 8);
+      if (who.length) parts.push('<h3>Residents</h3>' + who.map((p) => this.pname(p.id)).join(', '));
+    }
+    return parts.join('');
+  }
+
   // ---------------------------------------------------------------- almanac
   openAlmanac(tab?: string) {
     if (tab) this.tab = tab;
@@ -454,7 +534,7 @@ export class UI {
   }
   private renderAlmanac() {
     const { world: w } = this.ctx;
-    const tabs = ['chronicle', 'peoples', 'languages', 'life', 'technology'];
+    const tabs = ['chronicle', 'peoples', 'wars', 'languages', 'life', 'technology'];
     let body = '';
     if (this.tab === 'chronicle') {
       const groups: Record<string, EventType[]> = {
@@ -474,6 +554,12 @@ export class UI {
       const dead = w.civs.filter((c) => c.collapsed >= 0).length;
       body = `<table><tr><th>People</th><th>Rank</th><th>Government</th><th>Population</th><th>Places</th><th>Culture</th><th>Founded</th></tr>${civs.slice(0, 120).map((c) => `<tr><td><a class="l" data-civ="${c.id}">The ${esc(c.name)}</a></td><td>${c.rank}</td><td>${c.government}</td><td>${num(c.pop)}</td><td>${c.members.length}</td><td>${esc(w.cultures.get(c.culture)?.name ?? '')}</td><td>${yearOf(c.founded)}</td></tr>`).join('')}</table><p style="color:var(--dim)">${dead} peoples have fallen. ${w.cultures.list.length} cultures have existed.</p>
         <h3 style="font-size:10px;letter-spacing:.24em;color:var(--dim);text-transform:uppercase">Cultures</h3><table><tr><th>Culture</th><th>Parent</th><th>Language</th><th>Emerged</th><th>Origin</th></tr>${[...w.cultures.list].reverse().slice(0, 60).map((c) => `<tr><td><a class="l" data-culture="${c.id}">The ${esc(c.name)}</a> ${esc(c.symbol)}</td><td>${c.parent ? esc(w.cultures.get(c.parent)!.name) : '—'}</td><td>${esc(w.langs.get(c.language)?.name ?? '')}</td><td>${yearOf(c.born)}</td><td style="color:var(--dim)">${esc(c.origin)}</td></tr>`).join('')}</table>`;
+    } else if (this.tab === 'wars') {
+      const rels = [...w.diplomacy.rel.values()].filter((r) => r.war || r.battles > 0).sort((a, b) => Number(b.war) - Number(a.war) || b.warStart - a.warStart);
+      const all = [...w.diplomacy.rel.values()].filter((r) => r.tension > 0.3 && !r.war).sort((a, b) => b.tension - a.tension).slice(0, 12);
+      const nm = (id: number) => `<a class="l" data-civ="${id}">The ${esc(w.civs[id - 1]?.name ?? '?')}</a>`;
+      body = `<table><tr><th>Conflict</th><th>Status</th><th>Began</th><th>Battles</th><th>Dead</th><th>Cause</th></tr>${rels.map((r) => `<tr><td>${nm(r.attacker || r.a)} vs ${nm((r.attacker || r.a) === r.a ? r.b : r.a)}</td><td>${r.war ? '<span class="neg">ongoing</span>' : 'ended'}</td><td>${r.warStart >= 0 ? yearOf(r.warStart) : '—'}</td><td>${r.battles}</td><td>${r.losses[0] + r.losses[1]}</td><td style="color:var(--dim)">${esc(r.cause)}</td></tr>`).join('') || '<tr><td colspan="6" style="color:var(--dim)">No wars yet.</td></tr>'}</table>
+        <h3 style="font-size:10px;letter-spacing:.24em;color:var(--dim);text-transform:uppercase;margin-top:18px">Rising tensions</h3><table><tr><th>Peoples</th><th>Tension</th><th>Trade</th><th>Raids</th></tr>${all.map((r) => `<tr><td>${nm(r.a)} / ${nm(r.b)}</td><td>${r.tension.toFixed(2)}</td><td>${r.trade.toFixed(1)}</td><td>${r.raids.toFixed(1)}</td></tr>`).join('') || '<tr><td colspan="4" style="color:var(--dim)">Peace holds.</td></tr>'}</table>`;
     } else if (this.tab === 'languages') {
       body = `<pre class="tree" style="font-size:13px">${this.langTree(0)}</pre><table style="margin-top:14px"><tr><th>Language</th><th>Parent</th><th>Order</th><th>Type</th><th>Writing</th><th>Vocab</th><th>Sample</th></tr>${w.langs.list.map((l) => `<tr><td>${esc(l.name)}</td><td>${l.parent ? esc(w.langs.get(l.parent)!.name) : '—'}</td><td>${l.wordOrder}</td><td>${l.morphology}</td><td>${l.writing}</td><td>${num(l.vocabulary)}</td><td style="color:var(--dim)">water ${esc(l.lexicon['water'] ?? '')} · fire ${esc(l.lexicon['fire'] ?? '')} · mother ${esc(l.lexicon['mother'] ?? '')}</td></tr>`).join('')}</table>`;
     } else if (this.tab === 'life') {
@@ -524,6 +610,8 @@ export class UI {
       ['SETTLEMENTS', String(sets.length)], ['LANGUAGES', String(w.langs.list.length)], ['CULTURES', String(w.cultures.list.length)],
       ['TECHNOLOGIES', `${w.techCount()} / ${TECH_IDS.length}`], ['WARS / BATTLES', String(c['BATTLE'] ?? 0)],
       ['DISCOVERIES', String((c['TECHNOLOGY_DISCOVERY'] ?? 0) + (c['DISCOVERY'] ?? 0))], ['ACTIVE EVENTS', `${active} bands, ${sets.filter((s) => s.diseaseUntil > w.day).length} epidemics, ${sets.filter((s) => s.stress > 0.6).length} famines`],
+      ['BUILDINGS', `${w.buildings.list.filter((b) => b.done >= 0 && b.kind !== 'field').length} built, ${w.buildings.list.filter((b) => b.kind === 'field' && b.done >= 0).length} fields`],
+      ['DEPLETED NODES', String(w.res.state.size)], ['WARS NOW', String(w.diplomacy.wars().length)], ['TREE SPECIES', String(w.flora.species.length)],
       ['BIRTHS / DEATHS', `${num(w.stats.births)} / ${num(w.stats.deaths)}`], ['SIM RATE', `${fmtRate(e.effective)} · ${e.stepMs.toFixed(1)} ms/frame`], ['FPS', this.ctx.fps().toFixed(0)],
     ];
     const html = `<div class="g">${rows.map(([k, v]) => `<span class="k">${k}</span><span>${esc(v)}</span>`).join('')}</div>
@@ -623,7 +711,10 @@ export class UI {
 }
 
 function fmtRate(daysPerSec: number): string {
-  if (daysPerSec < 1) return `${daysPerSec.toFixed(2)} d/s`;
+  const perMin = daysPerSec * 1440;
+  if (perMin < 1.5) return `${perMin.toFixed(1)} min/s`;
+  if (perMin < 90) return `${perMin.toFixed(0)} min/s`;
+  if (daysPerSec < 1.5) return `${(daysPerSec * 24).toFixed(0)} h/s`;
   if (daysPerSec < 180) return `${daysPerSec.toFixed(0)} days/s`;
   return `${(daysPerSec / 360).toFixed(1)} yr/s`;
 }

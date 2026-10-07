@@ -1,23 +1,21 @@
 import type { World } from './sim/world';
 import { DAYS_PER_YEAR } from './sim/time';
 
-export const SPEEDS = [0, 0.1, 1, 10, 100, 1000, 10000];
-export const SPEED_LABELS = ['❚❚', '×0.1', '×1', '×10', '×100', '×1,000', '×10,000'];
-export const SPEED = { pause: 0, slow: 1, x1: 2, x10: 3, x100: 4, x1k: 5, x10k: 6 };
+/** Simulated days per real second. ×1 is "living pace": one simulated minute per second, so a day lasts 24 real minutes
+ *  and a person visibly walks, chops and builds. Higher steps compress hours, days, seasons and finally centuries. */
+export const SPEEDS = [0, 1 / 1440, 1 / 144, 1 / 14.4, 1 / 1.44, 6.94, 69.4, 694, 6944];
+export const SPEED_LABELS = ['❚❚', '×1', '×10', '×100', '×1k', '×10k', '×100k', '×1M', '×10M'];
+export const SPEED_HINT = ['paused', '1 minute per second', '10 minutes per second', '100 minutes per second', '~17 hours per second', '~7 days per second', '~70 days per second', '~2 years per second', '~19 years per second'];
+export const SPEED = { pause: 0, x1: 1, x10: 2, x100: 3, x1k: 4, x10k: 5, x100k: 6, x1M: 7, x10M: 8 };
 
-/** Tick size grows with speed: fine-grained when watching one person, coarse when centuries fly by. */
+/** Tick size: about a fifth of a real second of simulated time, from 30 simulated seconds up to 30 days. */
 export function stepFor(daysPerSec: number): number {
-  if (daysPerSec <= 0.1) return 0.05;
-  if (daysPerSec <= 1) return 0.25;
-  if (daysPerSec <= 10) return 1;
-  if (daysPerSec <= 100) return 2;
-  if (daysPerSec <= 1000) return 7;
-  return 30;
+  return Math.max(1 / 2880, Math.min(30, daysPerSec * 0.2));
 }
 
 /** Drives the simulation from real time with a per-frame budget. Rendering reads the world; it never writes. */
 export class Engine {
-  speedIdx = 4;
+  speedIdx = 1;
   debt = 0;
   sinceTick = 0;
   lastStep = 1;
@@ -68,9 +66,9 @@ export class Engine {
       const dps = this.daysPerSec;
       const step = stepFor(dps);
       this.lastStep = step;
-      this.debt += Math.min(dtReal, 0.1) * dps;
+      this.debt += Math.min(dtReal, 0.25) * dps;
       let guard = 0;
-      while (this.debt >= step && guard++ < 20000) {
+      while (this.debt >= step && guard++ < 40000) {
         w.step(step);
         this.debt -= step;
         simmed += step;
