@@ -40,13 +40,13 @@ export const BDEFS: Record<BKind, BDef> = {
   tower: { name: 'Watchtower', cost: { stone: 170, wood: 50 }, labor: 300, cap: 0, size: 0.012, tech: ['architecture'], minPop: 60 },
   well: { name: 'Well', cost: { stone: 50 }, labor: 80, cap: 0, size: 0.006, tech: ['tools'], minPop: 40 },
   field: { name: 'Field', cost: {}, labor: 150, cap: 0, size: 0.1, tech: ['agriculture'], minPop: 0 },
-  dock: { name: 'Dock', cost: { wood: 90, stone: 20 }, labor: 260, cap: 0, size: 0.03, tech: ['navigation'], minPop: 50 },
+  dock: { name: 'Dock', cost: { wood: 100 }, labor: 260, cap: 0, size: 0.03, tech: ['navigation'], minPop: 25 },
   palisade: { name: 'Palisade', cost: { wood: 260 }, labor: 380, cap: 0, size: 0, tech: ['tools'], minPop: 60 },
-  wall: { name: 'Town wall', cost: { stone: 700, wood: 60 }, labor: 1800, cap: 0, size: 0, tech: ['architecture'], minPop: 220 },
-  factory: { name: 'Factory', cost: { stone: 300, wood: 100, metal: 40 }, labor: 1500, cap: 0, size: 0.06, tech: ['industry'], minPop: 150 },
-  powerplant: { name: 'Power station', cost: { stone: 400, metal: 80 }, labor: 2400, cap: 0, size: 0.07, tech: ['electricity'], minPop: 220 },
-  airport: { name: 'Airport', cost: { stone: 700, metal: 60 }, labor: 4000, cap: 0, size: 0.5, tech: ['flight'], minPop: 280 },
-  launchpad: { name: 'Launch site', cost: { stone: 900, metal: 220 }, labor: 9000, cap: 0, size: 0.25, tech: ['rocketry'], minPop: 300 },
+  wall: { name: 'Town wall', cost: { stone: 700, wood: 60 }, labor: 1800, cap: 0, size: 0, tech: ['architecture'], minPop: 140 },
+  factory: { name: 'Factory', cost: { stone: 300, wood: 100, metal: 40 }, labor: 1500, cap: 0, size: 0.06, tech: ['industry'], minPop: 100 },
+  powerplant: { name: 'Power station', cost: { stone: 400, metal: 80 }, labor: 2400, cap: 0, size: 0.07, tech: ['electricity'], minPop: 140 },
+  airport: { name: 'Airport', cost: { stone: 700, metal: 60 }, labor: 4000, cap: 0, size: 0.5, tech: ['flight'], minPop: 160 },
+  launchpad: { name: 'Launch site', cost: { stone: 900, metal: 220 }, labor: 9000, cap: 0, size: 0.25, tech: ['rocketry'], minPop: 180 },
 };
 /** Ring defences: drawn around the whole town, not placed as a single footprint. */
 export const RINGS: BKind[] = ['palisade', 'wall'];
@@ -101,7 +101,7 @@ export class Buildings {
   }
 
   /** Organic placement: a growing, jittered rosette around the centre with spacing; fields on fertile ground further out. */
-  place(s: Settlement, kind: BKind, rng: Rng): { x: number; y: number } | null {
+  place(s: Settlement, kind: BKind, rng: Rng): { x: number; y: number; rot?: number } | null {
     const w = this.world;
     const p = w.planet;
     const mine = this.of(s.id);
@@ -120,11 +120,31 @@ export class Buildings {
       }
       return null;
     }
+    if (isField) {
+      // farmland grows as a patchwork: most new fields are laid against an existing one, square to it
+      const fields = mine.filter((b) => b.kind === 'field');
+      if (fields.length && rng.next() < 0.8) {
+        const step = def.size * 1.04;
+        for (let attempt = 0; attempt < 12; attempt++) {
+          const f = fields[rng.int(fields.length)];
+          const side = rng.int(4);
+          const lx = side === 0 ? step : side === 1 ? -step : 0, ly = side === 2 ? step : side === 3 ? -step : 0;
+          const cr = Math.cos(f.rot), sr = Math.sin(f.rot);
+          const y = f.y + (lx * sr + ly * cr) / KM_PER_CELL_Y;
+          if (y < 0.2 || y > H - 0.2) continue;
+          const x = f.x + (lx * cr - ly * sr) / kmPerCellX(y);
+          const cell = idx(wrapX(Math.floor(x)), Math.floor(y));
+          if (p.ocean[cell] || w.env.fert[cell] < 0.12 || !p.isLand(x, y, 0.004)) continue;
+          if (!this.fieldFits(mine, x, y)) continue;
+          return { x: ((x % W) + W) % W, y, rot: f.rot };
+        }
+      }
+    }
     const far = kind === 'factory' || kind === 'powerplant' ? [0.5, 1.6] : kind === 'airport' ? [2.5, 4] : kind === 'launchpad' ? [5, 9] : null;
     for (let attempt = 0; attempt < 30; attempt++) {
       // radial density falls off from the centre; civic buildings stay central
       const civic = kind === 'hall' || kind === 'market' || kind === 'temple' || kind === 'well';
-      const rKm = far ? far[0] + rng.next() * (far[1] - far[0]) : isField ? 0.35 + Math.sqrt(rng.next()) * (0.8 + Math.sqrt(s.pop) * 0.08 + n * 0.004) : civic ? 0.03 + rng.next() * 0.12 : 0.03 + Math.sqrt(rng.next()) * (0.06 + Math.sqrt(n + 3) * 0.042);
+      const rKm = far ? far[0] + rng.next() * (far[1] - far[0]) : isField ? 0.25 + Math.sqrt(rng.next()) * (0.4 + Math.sqrt(s.pop) * 0.04 + n * 0.002) : civic ? 0.03 + rng.next() * 0.12 : 0.03 + Math.sqrt(rng.next()) * (0.06 + Math.sqrt(n + 3) * 0.042);
       const ang = rng.next() * Math.PI * 2;
       const y = s.y + (Math.sin(ang) * rKm) / KM_PER_CELL_Y;
       if (y < 0.2 || y > H - 0.2) continue;
@@ -133,16 +153,27 @@ export class Buildings {
       const cell = idx(xi, Math.floor(y));
       if (p.ocean[cell] || p.elev[cell] > 3.2 || !p.isLand(x, y, 0.004)) continue;
       let ok = true;
-      for (const b of mine) {
+      if (isField) ok = this.fieldFits(mine, x, y);
+      else for (const b of mine) {
         const kx = kmPerCellX(y);
         const d = Math.hypot(wrapDx(x, b.x) * kx, (y - b.y) * KM_PER_CELL_Y);
-        if (d < (def.size + BDEFS[b.kind].size) * (isField ? 0.8 : 1.15) + 0.004) { ok = false; break; }
+        if (d < (def.size + BDEFS[b.kind].size) * 1.15 + 0.004) { ok = false; break; }
       }
       if (!ok) continue;
       if (isField && w.env.fert[cell] < 0.12) continue;
       return { x: ((x % W) + W) % W, y };
     }
     return null;
+  }
+
+  /** A field may touch other fields edge to edge, but keeps clear of everything else. */
+  private fieldFits(mine: Building[], x: number, y: number): boolean {
+    const size = BDEFS.field.size, kx = kmPerCellX(y);
+    for (const b of mine) {
+      const d = Math.hypot(wrapDx(x, b.x) * kx, (y - b.y) * KM_PER_CELL_Y);
+      if (d < (b.kind === 'field' ? size * 0.97 : size * 0.5 + BDEFS[b.kind].size + 0.004)) return false;
+    }
+    return true;
   }
 
   /** Where the water begins around a town: along 24 bearings, the first sea or lake within 24 km, found to a few metres. */
@@ -189,7 +220,7 @@ export class Buildings {
     if (!pos) return null;
     if (spend) for (const k of Object.keys(def.cost) as ResKey[]) s.res[k] -= def.cost[k] ?? 0;
     const b: Building = {
-      id: this.list.length + 1, sid: s.id, kind, x: pos.x, y: pos.y, rot: rng.next() * Math.PI, progress: 0, started: w.day, done: -1,
+      id: this.list.length + 1, sid: s.id, kind, x: pos.x, y: pos.y, rot: pos.rot ?? rng.next() * Math.PI, progress: 0, started: w.day, done: -1,
       fstate: 0, planted: -1, weeds: 0, crop: 0, lastWork: w.day, residents: 0,
     };
     this.list.push(b);

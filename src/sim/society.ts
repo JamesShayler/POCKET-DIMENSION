@@ -9,6 +9,7 @@ import { DAYS_PER_SEASON, DAYS_PER_YEAR, seasonOf, yearOf } from './time';
 import { NV, VALUE_KEYS } from './culture';
 import { economySeason } from './economy';
 import { wallFactor } from './diplomacy';
+import { RES_KEYS } from './buildings';
 import { contactRange, governRange, innovationMult, oceanGoing, yieldMult } from './techfx';
 
 const TECH_RATE = 0.35;
@@ -79,6 +80,10 @@ export function settlementSeason(w: World) {
     s.produced = 0;
     s.consumed = 0;
     s.food = Math.min(s.pop * 40, s.food * Math.exp(-(has(s, 'pottery') ? 0.003 : 0.006) * DAYS_PER_SEASON));
+    // stored timber slowly rots, and a town keeps only what it has room and hands for: the excess is used, traded or lost
+    s.res.wood *= Math.exp(-0.0004 * DAYS_PER_SEASON);
+    const room = 400 + s.pop * 40;
+    for (const k of RES_KEYS) if (s.res[k] > room) s.res[k] = room + (s.res[k] - room) * 0.5;
     s.threat = Math.max(0, s.threat - 0.05);
     s.defense = Math.max(0, s.defense * 0.98);
     s.yearsSettled += 0.25;
