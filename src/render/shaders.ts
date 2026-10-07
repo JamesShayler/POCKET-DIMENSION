@@ -52,10 +52,11 @@ vec3 scatter(vec3 r0, vec3 rd, float tMax, vec3 sunDir, float sunI, out vec3 tra
     float h = length(x) - PR;
     float dR = exp(-h/HR)*ds, dM = exp(-h/HM)*ds;
     odR += dR; odM += dM;
-    // light reaching this point from the sun
+    // light reaching this point from the sun: the planet's shadow, softened over the terminator
     vec2 ps = rsi(x, sunDir, AR);
-    vec2 pgs = rsi(x, sunDir, PR);
-    if (pgs.x > 0.0 && pgs.x < 1e8) continue; // the planet is in the way (1e9 means no intersection)
+    float tc = dot(x, sunDir);
+    float sh = tc < 0.0 ? smoothstep(PR - 2.0, PR + 14.0, length(x - sunDir * tc)) : 1.0;
+    if (sh <= 0.0) continue;
     float dsl = ps.y / float(M);
     float lR = 0.0, lM = 0.0;
     for (int j = 0; j < M; j++) {
@@ -64,7 +65,7 @@ vec3 scatter(vec3 r0, vec3 rd, float tMax, vec3 sunDir, float sunI, out vec3 tra
       lR += exp(-hl/HR)*dsl; lM += exp(-hl/HM)*dsl;
     }
     vec3 att = exp(-(KR*(odR+lR) + KM*1.1*(odM+lM)));
-    tR += dR*att; tM += dM*att;
+    tR += dR*att*sh; tM += dM*att*sh;
   }
   trans = exp(-(KR*odR + KM*1.1*odM));
   return sunI * (pR*KR*tR + pM*KM*tM);

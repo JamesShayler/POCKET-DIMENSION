@@ -40,7 +40,7 @@ export const BDEFS: Record<BKind, BDef> = {
   tower: { name: 'Watchtower', cost: { stone: 170, wood: 50 }, labor: 300, cap: 0, size: 0.012, tech: ['architecture'], minPop: 60 },
   well: { name: 'Well', cost: { stone: 50 }, labor: 80, cap: 0, size: 0.006, tech: ['tools'], minPop: 40 },
   field: { name: 'Field', cost: {}, labor: 150, cap: 0, size: 0.1, tech: ['agriculture'], minPop: 0 },
-  dock: { name: 'Dock', cost: { wood: 160, stone: 60 }, labor: 320, cap: 0, size: 0.03, tech: ['navigation'], minPop: 50 },
+  dock: { name: 'Dock', cost: { wood: 90, stone: 20 }, labor: 260, cap: 0, size: 0.03, tech: ['navigation'], minPop: 50 },
   palisade: { name: 'Palisade', cost: { wood: 260 }, labor: 380, cap: 0, size: 0, tech: ['tools'], minPop: 60 },
   wall: { name: 'Town wall', cost: { stone: 700, wood: 60 }, labor: 1800, cap: 0, size: 0, tech: ['architecture'], minPop: 220 },
   factory: { name: 'Factory', cost: { stone: 300, wood: 100, metal: 40 }, labor: 1500, cap: 0, size: 0.06, tech: ['industry'], minPop: 150 },
@@ -145,7 +145,7 @@ export class Buildings {
     return null;
   }
 
-  /** Where the water begins around a town: along 24 bearings, the first sea or lake within 14 km, found to a few metres. */
+  /** Where the water begins around a town: along 24 bearings, the first sea or lake within 24 km, found to a few metres. */
   private shore(s: Settlement): { x: number; y: number }[] {
     const key = `${s.id}:${s.x}:${s.y}`;
     const hit = this.shoreMemo.get(key);
@@ -160,7 +160,7 @@ export class Buildings {
       const ang = (k / 24) * Math.PI * 2 + 0.1;
       const ca = Math.cos(ang), sa = Math.sin(ang);
       let lo = 0, hi = -1;
-      for (let r = 0.25; r <= 14; r += 0.25) {
+      for (let r = 0.25; r <= 24; r += 0.25) {
         const q = at(ca, sa, r);
         if (q.y < 0.2 || q.y > H - 0.2) break;
         if (!p.isLand(q.x, q.y, 0.0)) { hi = r; break; }

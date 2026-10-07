@@ -209,7 +209,7 @@ export class ObserverView {
     this.rig.update(dt);
     this.sky.heavens.update(day, this.visualPhase);
     const sunTarget = this.sky.heavens.place(0, 0, 0);
-    this.rig.apply(this.camera, (x, y, z) => this.terrain.heightAt(x, y, z), this.rig.alt > 3e6 ? sunTarget : null);
+    this.rig.apply(this.camera, (x, y, z) => this.terrain.surfaceAt(x, y, z), this.rig.alt > 3e6 ? sunTarget : null);
     this.camera.updateMatrixWorld();
     const cam = this.rig.pos;
     const origin: [number, number, number] = [cam[0], cam[1], cam[2]];

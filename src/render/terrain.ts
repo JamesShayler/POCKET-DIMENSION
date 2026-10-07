@@ -28,6 +28,7 @@ interface Node {
   detailOff?: THREE.Vector3;
   heights?: Float32Array;
   seg?: number;
+  surface?: Float32Array;
   trees?: Float32Array;
   pending: boolean;
   used: number;
@@ -132,6 +133,7 @@ export class Terrain {
     m.visible = false;
     n.mesh = m;
     n.heights = r.heights;
+    n.surface = r.surface;
     n.seg = r.seg;
     n.minH = r.minH;
     n.maxH = r.maxH;
@@ -225,7 +227,7 @@ export class Terrain {
       if (n.mesh) { this.group.remove(n.mesh); n.mesh.geometry.dispose(); }
       if (n.water) { this.group.remove(n.water); n.water.geometry.dispose(); }
       n.mesh = n.water = undefined;
-      n.heights = n.trees = undefined;
+      n.heights = n.surface = n.trees = undefined;
       n.children = undefined;
       this.all.delete(n.key);
     }
@@ -235,6 +237,13 @@ export class Terrain {
 
   /** Height (km) of the drawn ground at a unit direction, from the finest loaded chunk (null if none). */
   heightAt(x: number, y: number, z: number): number | null {
+    return this.gridAt(x, y, z, false);
+  }
+  /** Height (km) of the ground or of the water over it, whichever is higher: the observer stays above it. */
+  surfaceAt(x: number, y: number, z: number): number | null {
+    return this.gridAt(x, y, z, true);
+  }
+  private gridAt(x: number, y: number, z: number, water: boolean): number | null {
     const f = dirFace(x, y, z);
     let best: Node | undefined;
     let n: Node | undefined = this.roots[f.face];
@@ -252,7 +261,7 @@ export class Terrain {
     const a = (((f.s + 1) / 2) * k - best.i) * S, b = (((f.t + 1) / 2) * k - best.j) * S;
     const a0 = Math.max(0, Math.min(S - 1, Math.floor(a))), b0 = Math.max(0, Math.min(S - 1, Math.floor(b)));
     const u = Math.max(0, Math.min(1, a - a0)), v = Math.max(0, Math.min(1, b - b0));
-    const V = S + 1, hh = best.heights;
+    const V = S + 1, hh = water && best.surface ? best.surface : best.heights;
     const A = hh[b0 * V + a0], B = hh[b0 * V + a0 + 1], C = hh[(b0 + 1) * V + a0], D = hh[(b0 + 1) * V + a0 + 1];
     return u + v <= 1 ? A + u * (B - A) + v * (C - A) : D + (1 - u) * (C - D) + (1 - v) * (B - D);
   }
@@ -465,9 +474,13 @@ function waterMaterial(f: Fields): THREE.ShaderMaterial {
         // sea ice where the water freezes
         float floes = fbm3(d * 240.0) + (fbm3(lp * 3.0) - 0.5) * 0.4 * nearW;
         float ice = smoothstep(-0.8, -2.4, sst + (floes - 0.5) * 2.5) * (1.0 - nearW * 0.2);
-        vec3 skyC = mix(vec3(0.02, 0.03, 0.06), mix(vec3(0.85, 0.5, 0.3), vec3(0.45, 0.62, 0.9), smoothstep(0.0, 0.3, sunUp)), day);
         float fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
         vec3 R = reflect(-V, N);
+        // the reflected sky: blue overhead, with the low sun's glow only toward the sun
+        vec3 zen = mix(vec3(0.02, 0.03, 0.06), vec3(0.4, 0.56, 0.88), smoothstep(-0.15, 0.25, sunUp));
+        float az = dot(normalize(R - d * dot(R, d) + 1e-5), normalize(L - d * dot(L, d) + 1e-5));
+        float glowK = pow(max(az, 0.0), 6.0) * (1.0 - smoothstep(0.05, 0.4, sunUp)) * smoothstep(-0.15, 0.0, sunUp);
+        vec3 skyC = mix(zen, vec3(0.95, 0.5, 0.25), glowK);
         float shin = mix(220.0, mix(60.0, 18.0, clamp(rough - 0.35, 0.0, 1.0)), unres);
         float spec = pow(max(dot(R, L), 0.0), shin) * 6.0 * (shin / 220.0) * smoothstep(-0.02, 0.05, sunUp) * (1.0 - ice);
         float ndl = max(dot(N, L), 0.0) * smoothstep(-0.03, 0.06, sunUp);

@@ -86,6 +86,7 @@ export interface ChunkResult {
   elev: Float32Array; // km above sea level per vertex
   index: Uint32Array;
   heights: Float32Array; // (seg+1)² surface heights for placing things on the ground
+  surface: Float32Array; // (seg+1)² the higher of ground and water: what the observer cannot go below
   seg: number;
   water?: { pos: Float32Array; depth: Float32Array; dir: Float32Array; index: Uint32Array };
   trees?: Float32Array; // stride 8: x y z height crown type hue cell
@@ -246,6 +247,7 @@ export class TerrainGen {
     const dir = new Float32Array(nv * 3);
     const elev = new Float32Array(nv);
     const heights = new Float32Array(V * V);
+    const surface = new Float32Array(V * V);
     for (let b = 0; b < V; b++) for (let a = 0; a < V; a++) {
       const k = (b + 1) * G + (a + 1);
       const v = b * V + a;
@@ -253,6 +255,7 @@ export class TerrainGen {
       dir[v * 3] = D[k * 3]; dir[v * 3 + 1] = D[k * 3 + 1]; dir[v * 3 + 2] = D[k * 3 + 2];
       elev[v] = Hh[k];
       heights[v] = Hh[k];
+      surface[v] = isNaN(Wt[k]) ? Hh[k] : Math.max(Hh[k], Wt[k]);
       // normal from the cross product of central differences
       const l = k - 1, r = k + 1, dn = k - G, up = k + G;
       const ux = P[r * 3] - P[l * 3], uy = P[r * 3 + 1] - P[l * 3 + 1], uz = P[r * 3 + 2] - P[l * 3 + 2];
@@ -291,7 +294,7 @@ export class TerrainGen {
         index.push(a0, b0, a1, a1, b0, b1);
       }
     }
-    const res: ChunkResult = { key, center, pos, normal, dir, elev, index: Uint32Array.from(index), heights, minH, maxH, seg: SEG };
+    const res: ChunkResult = { key, center, pos, normal, dir, elev, index: Uint32Array.from(index), heights, surface, minH, maxH, seg: SEG };
     // ---- water surface (sea, lakes, rivers)
     let anyWater = false;
     for (let b = 1; b <= SEG + 1 && !anyWater; b++) for (let a = 1; a <= SEG + 1; a++) if (!isNaN(Wt[b * G + a])) { anyWater = true; break; }

@@ -6,6 +6,8 @@ import { AU_KM, MOON, SUN_RADIUS_KM } from '../sim/space';
 import { ATMOSPHERE, LOGDEPTH_FRAG, LOGDEPTH_FRAG_PARS, LOGDEPTH_VERT, LOGDEPTH_VERT_PARS, NOISE } from './shaders';
 import { Heavens } from './heavens';
 
+const TAIL = 24; // segments in a comet's tail
+
 /**
  * Everything above the ground, at its true size and distance: the scattering atmosphere, the sun (one astronomical
  * unit away), the moon, the other planets on their orbits, comets, the stars, and what people have put in orbit.
@@ -29,7 +31,7 @@ export class SkyLayer {
   private dotPos: Float32Array;
   private dotCol: Float32Array;
   private orbits: THREE.LineLoop[] = [];
-  private comets: { head: THREE.Points; tail: THREE.Line }[] = [];
+  private comets: { head: THREE.Points; tail: THREE.Mesh; mat: THREE.ShaderMaterial }[] = [];
   private sats: THREE.Points;
   private satPos: Float32Array;
   private lights: THREE.Points;
@@ -172,12 +174,29 @@ export class SkyLayer {
       hg.setAttribute('color', new THREE.BufferAttribute(new Float32Array([0.8, 0.92, 1]), 3));
       const head = new THREE.Points(hg, pointMaterial(3));
       head.frustumCulled = false;
+      // the tail: a soft ribbon facing the camera, widening and fading away from the head
       const tg = new THREE.BufferGeometry();
-      tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3));
-      tg.setAttribute('color', new THREE.BufferAttribute(new Float32Array([0.7, 0.85, 1, 0, 0, 0]), 3));
-      const tail = new THREE.Line(tg, new THREE.LineBasicMaterial({ vertexColors: true, blending: THREE.AdditiveBlending, transparent: true, depthWrite: false }));
+      const tc = new Float32Array((TAIL + 1) * 2 * 2);
+      const ti: number[] = [];
+      for (let k = 0; k <= TAIL; k++) {
+        tc.set([k / TAIL, -1, k / TAIL, 1], k * 4);
+        if (k < TAIL) { const a = k * 2; ti.push(a, a + 1, a + 2, a + 1, a + 3, a + 2); }
+      }
+      tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array((TAIL + 1) * 2 * 3), 3));
+      tg.setAttribute('tc', new THREE.BufferAttribute(tc, 2));
+      tg.setIndex(ti);
+      const mat = new THREE.ShaderMaterial({
+        transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
+        uniforms: { uGlow: { value: 0 } },
+        vertexShader: /* glsl */ `${LOGDEPTH_VERT_PARS} attribute vec2 tc; varying vec2 vT;
+          void main(){ vT = tc; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); ${LOGDEPTH_VERT} }`,
+        fragmentShader: /* glsl */ `${LOGDEPTH_FRAG_PARS} uniform float uGlow; varying vec2 vT;
+          void main(){ ${LOGDEPTH_FRAG} float a = pow(1.0 - vT.x, 1.7) * (1.0 - vT.y * vT.y) * smoothstep(0.0, 0.03, vT.x + 0.01) * uGlow;
+            gl_FragColor = vec4(vec3(0.55, 0.7, 0.95) * a, 1.0); }`,
+      });
+      const tail = new THREE.Mesh(tg, mat);
       tail.frustumCulled = false;
-      this.comets.push({ head, tail });
+      this.comets.push({ head, tail, mat });
       this.group.add(head, tail);
     }
     // ---- satellites
@@ -312,18 +331,28 @@ export class SkyLayer {
       const hp = o.head.geometry.attributes.position as THREE.BufferAttribute;
       hp.setXYZ(0, rel[0], rel[1], rel[2]);
       hp.needsUpdate = true;
-      const glow = Math.min(1.5, 0.6 / (rAU * rAU)) * ct.size;
+      // like the stars, comets are lost in a bright sky
+      const glow = Math.min(1.5, 0.6 / (rAU * rAU)) * ct.size * this.starMat.uniforms.uVis.value;
       (o.head.geometry.attributes.color as THREE.BufferAttribute).setXYZ(0, 0.8 * glow, 0.9 * glow, glow);
       (o.head.geometry.attributes.color as THREE.BufferAttribute).needsUpdate = true;
       const away = h.vec(X, Y, Z);
       const al = Math.hypot(away[0], away[1], away[2]);
       const len = (2.5e7 / Math.max(0.15, rAU * rAU)) * ct.size;
       const tp = o.tail.geometry.attributes.position as THREE.BufferAttribute;
-      tp.setXYZ(0, rel[0], rel[1], rel[2]);
-      tp.setXYZ(1, rel[0] + (away[0] / al) * len, rel[1] + (away[1] / al) * len, rel[2] + (away[2] / al) * len);
+      const ax = away[0] / al, ay = away[1] / al, az = away[2] / al;
+      for (let k = 0; k <= TAIL; k++) {
+        const t = k / TAIL;
+        const px = rel[0] + ax * len * t, py = rel[1] + ay * len * t, pz = rel[2] + az * len * t;
+        // across the tail and across the line of sight (the camera is at the origin)
+        let sx = ay * pz - az * py, sy = az * px - ax * pz, sz = ax * py - ay * px;
+        const sl = Math.hypot(sx, sy, sz) || 1;
+        const wdt = len * (0.008 + 0.07 * t);
+        sx = (sx / sl) * wdt; sy = (sy / sl) * wdt; sz = (sz / sl) * wdt;
+        tp.setXYZ(k * 2, px - sx, py - sy, pz - sz);
+        tp.setXYZ(k * 2 + 1, px + sx, py + sy, pz + sz);
+      }
       tp.needsUpdate = true;
-      (o.tail.geometry.attributes.color as THREE.BufferAttribute).setXYZ(0, 0.6 * glow, 0.75 * glow, 0.9 * glow);
-      (o.tail.geometry.attributes.color as THREE.BufferAttribute).needsUpdate = true;
+      o.mat.uniforms.uGlow.value = Math.min(1, glow * 0.8);
     });
     // ---- satellites: points of reflected sunlight, dark in the planet's shadow
     const sats = this.c.skyState.satellites;

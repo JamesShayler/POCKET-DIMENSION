@@ -152,4 +152,9 @@ technology up to spaceflight, diplomacy, war and the observer. What remains simp
 * Satellites, stations and probes follow real orbits and transfer times, but spacecraft are not simulated in flight; nothing
   lands on or colonises other planets.
 * Animals are drawn as herds at the positions hunters use (a few per population), not one model per animal.
+* Every person is an individual agent, so a world holds a few thousand people at once: a "city" is a few hundred, a large
+  state several hundred to a thousand. Population thresholds for ideas are calibrated to that scale. History is slow on
+  purpose: in a 1,000-year headless run of seed `pocket`, agriculture arrives around year 250, writing around 450, printing
+  around 600 and steam power around 950; the industrial, electrical and space ages come later still (use **Jump**).
 * At the highest speeds the engine sheds backlog rather than freezing (the dashboard shows the achieved rate).
+* Headless or software-rendered browsers (no GPU) refine the ground slowly; with a GPU it follows the camera in real time.

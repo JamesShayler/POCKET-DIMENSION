@@ -10,7 +10,7 @@ ctx.onmessage = (ev: MessageEvent<{ t: 'init'; input: TerrainInput } | { t: 'chu
   if (m.t === 'init') { gen = new TerrainGen(m.input); return; }
   if (!gen) return;
   const r: ChunkResult = gen.chunk(m.face, m.level, m.i, m.j, m.key);
-  const tr: Transferable[] = [r.pos.buffer, r.normal.buffer, r.dir.buffer, r.elev.buffer, r.index.buffer, r.heights.buffer];
+  const tr: Transferable[] = [r.pos.buffer, r.normal.buffer, r.dir.buffer, r.elev.buffer, r.index.buffer, r.heights.buffer, r.surface.buffer];
   if (r.water) tr.push(r.water.pos.buffer, r.water.depth.buffer, r.water.dir.buffer, r.water.index.buffer);
   if (r.trees) tr.push(r.trees.buffer);
   ctx.postMessage(r, tr);

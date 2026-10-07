@@ -122,6 +122,9 @@ function nextProjects(w: World, s: Settlement): { start: BKind[]; shopping: BKin
   want('workshop', 1 + Math.floor(pop / 160));
   want('kiln', 1 + Math.floor(pop / 220));
   want('granary', 1 + Math.floor(pop / 160));
+  // a harbour comes early for a town by the water: fishing boats, then trade and war fleets
+  const c = idx(wrapX(Math.floor(s.x)), Math.floor(s.y));
+  if (w.planet.coastDist[c] <= 1 || w.planet.lake[c]) want('dock', 1 + Math.floor(pop / 700));
   if (has(s, 'metallurgy') && (s.res.copper + s.res.iron > 4)) want('smithy', 1 + Math.floor(pop / 320));
   want('market', (s.occupations['trader'] ?? 0) > 0 || pop >= 150 ? 1 + Math.floor(pop / 500) : 0);
   want('temple', (s.occupations['priest'] ?? 0) > 0 ? 1 + Math.floor(pop / 700) : 0);
@@ -129,8 +132,6 @@ function nextProjects(w: World, s: Settlement): { start: BKind[]; shopping: BKin
   // walls: a palisade first, stone when the town can afford masons
   const raided = s.threat > 0.25 || w.day - s.lastRaid < 4 * DAYS_PER_YEAR;
   if (raided) { if (has(s, 'architecture') && pop >= BDEFS.wall.minPop) want('wall', 1); else if (!cnt('wall')) want('palisade', 1); }
-  const c = idx(wrapX(Math.floor(s.x)), Math.floor(s.y));
-  if (w.planet.coastDist[c] <= 1 || w.planet.lake[c]) want('dock', 1 + Math.floor(pop / 700));
   want('factory', 1 + Math.floor(pop / 400));
   want('powerplant', 1 + Math.floor(pop / 1500));
   want('airport', 1 + Math.floor(pop / 3000));
