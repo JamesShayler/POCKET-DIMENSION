@@ -35,8 +35,8 @@ export class WeatherFx {
   constructor(private c: SimClient, fields: Fields) {
     this.lowMat = cloudMaterial(fields, 2.2, 0);
     this.highMat = cloudMaterial(fields, 9.0, 1);
-    this.low = new THREE.Mesh(new THREE.SphereGeometry(R_KM + 2.2, 720, 360), this.lowMat);
-    this.high = new THREE.Mesh(new THREE.SphereGeometry(R_KM + 9.0, 360, 180), this.highMat);
+    this.low = new THREE.Mesh(new THREE.SphereGeometry(R_KM + 2.2, 512, 256), this.lowMat);
+    this.high = new THREE.Mesh(new THREE.SphereGeometry(R_KM + 9.0, 256, 128), this.highMat);
     for (const m of [this.low, this.high]) { m.frustumCulled = false; m.renderOrder = 5; }
     // precipitation: streaks (rain) or slow flakes (snow) in a box around the observer
     const n = 9000;
@@ -107,6 +107,11 @@ export class WeatherFx {
       u.uCamH.value = camH;
       u.uDust.value = dust;
       u.uFlash.value = this.flash;
+      const k = mat === this.lowMat ? 6 : 14;
+      const t = day * k;
+      const wrap = (v: number) => v - Math.floor(v / 289) * 289;
+      u.uWind.value.set(wrap(t * 0.7), wrap(t * 0.13), wrap(-t * 0.3));
+      u.uPix.value = 1 / viewH;
       const sv = u.uStorm.value as THREE.Vector4[];
       for (let k = 0; k < STORMS; k++) {
         const s = storms[k];
@@ -215,6 +220,7 @@ function cloudMaterial(f: Fields, altKm: number, layer: number): THREE.ShaderMat
     transparent: true, depthWrite: false, side: THREE.DoubleSide,
     uniforms: {
       uWeather: { value: f.weather }, uSun: { value: new THREE.Vector3(1, 0, 0) }, uTime: { value: 0 }, uDay: { value: 0 }, uCamH: { value: 1 }, uDust: { value: 1 }, uFlash: { value: 0 },
+      uWind: { value: new THREE.Vector3() }, uPix: { value: 0.001 },
       uStorm: { value: Array.from({ length: STORMS }, () => new THREE.Vector4()) }, uStormDepth: { value: new Array(STORMS).fill(0) },
     },
     vertexShader: /* glsl */ `
@@ -224,6 +230,7 @@ function cloudMaterial(f: Fields, altKm: number, layer: number): THREE.ShaderMat
     fragmentShader: /* glsl */ `
       ${LOGDEPTH_FRAG_PARS}
       uniform sampler2D uWeather; uniform vec3 uSun; uniform float uTime; uniform float uDay; uniform float uCamH; uniform float uDust; uniform float uFlash;
+      uniform vec3 uWind; uniform float uPix;
       uniform vec4 uStorm[${STORMS}]; uniform float uStormDepth[${STORMS}];
       varying vec3 vDir; varying vec3 vView;
       ${NOISE}
@@ -253,9 +260,21 @@ function cloudMaterial(f: Fields, altKm: number, layer: number): THREE.ShaderMat
           swirl = max(swirl, band);
           cover *= mix(1.0, smoothstep(0.08, 0.35, dk), strength); // the eye
         }
-        float t = uDay * ${layer === 0 ? '6.0' : '14.0'};
-        vec3 q = p * ${layer === 0 ? '420.0' : '160.0'} + vec3(t * 0.7, t * 0.13, -t * 0.3);
-        float n = fbm5(q) + 0.35 * fbm3(q * 3.7 + 5.0) - 0.1 + swirl * 0.35;
+        // drift with the wind (the offset is wrapped on the CPU so it stays precise); octaves smaller than a pixel fade out
+        float dist0 = length(vView);
+        float foot = dist0 * uPix; // km per pixel here
+        vec3 q = p * ${layer === 0 ? '420.0' : '160.0'} + uWind;
+        float wl = ${layer === 0 ? '15.0' : '39.0'}; // km wavelength of the first octave
+        float n = 0.0, a = 0.5, norm = 0.0;
+        vec3 qq = q;
+        for (int o = 0; o < 7; o++) {
+          float fade = smoothstep(0.5, 2.0, wl / max(foot, 1e-4));
+          n += a * vnoise(qq) * fade + a * 0.5 * (1.0 - fade);
+          norm += a;
+          qq = qq * 2.0 + vec3(17.0, 31.0, 7.0);
+          a *= 0.5; wl *= 0.5;
+        }
+        n = n / norm * 0.97 + 0.35 * fbm3(p * ${layer === 0 ? '90.0' : '40.0'} + 5.0) - 0.12 + swirl * 0.35;
         float thr = 1.0 - cover * 0.95 - swirl * 0.4;
         float dens = smoothstep(thr, thr + ${layer === 0 ? '0.18' : '0.35'}, n) * ${layer === 0 ? '0.97' : '0.55'};
         if (dens < 0.004) discard;

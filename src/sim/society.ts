@@ -9,7 +9,7 @@ import { DAYS_PER_SEASON, DAYS_PER_YEAR, seasonOf, yearOf } from './time';
 import { NV, VALUE_KEYS } from './culture';
 import { economySeason } from './economy';
 import { wallFactor } from './diplomacy';
-import { contactRange, governRange, innovationMult, oceanGoing } from './techfx';
+import { contactRange, governRange, innovationMult, oceanGoing, yieldMult } from './techfx';
 
 const TECH_RATE = 0.35;
 const has = (s: Settlement, t: string) => (s.tech as Set<string>).has(t);
@@ -38,7 +38,8 @@ function capacity(w: World, s: Settlement): number {
     const fertile = w.env.fert[i] * (0.4 + w.planet.baseVeg[i]);
     tot += has(s, 'agriculture') ? 15 * fertile + 1.5 : 3.2 * fertile;
   }
-  return tot * (has(s, 'mathematics') ? 1.15 : 1) * (has(s, 'engineering') ? 1.3 : 1);
+  // better farming (calendars, fertilisers, machines) lets the same land feed more people
+  return tot * (has(s, 'mathematics') ? 1.15 : 1) * (has(s, 'engineering') ? 1.3 : 1) * yieldMult(s) * (has(s, 'medicine') ? 1.1 : 1);
 }
 
 // ============================ settlement season ============================

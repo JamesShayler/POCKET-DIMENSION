@@ -46,11 +46,13 @@ export class SkyLayer {
   constructor(private c: SimClient) {
     // ---- the atmosphere: a full-screen pass that integrates scattering along every view ray
     this.atmoMat = new THREE.ShaderMaterial({
-      depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending, transparent: true,
+      // drawn first in the opaque pass (transparent objects always draw after the ground, which would paint the sky over it)
+      depthTest: false, depthWrite: false, blending: THREE.AdditiveBlending, transparent: false,
       uniforms: { uInvProj: { value: new THREE.Matrix4() }, uCamRot: { value: new THREE.Matrix4() }, uCamPos: { value: new THREE.Vector3() }, uSun: { value: new THREE.Vector3(1, 0, 0) }, uSunI: { value: 22 }, uFlash: { value: 0 } },
       vertexShader: /* glsl */ `
         uniform mat4 uInvProj; uniform mat4 uCamRot; varying vec3 vRay;
-        void main(){ vec4 v = uInvProj * vec4(position.xy, 1.0, 1.0); vRay = (uCamRot * vec4(v.xyz / v.w, 0.0)).xyz; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
+        // unproject on the near plane: at the far plane (2e12 km) float32 cancels out and the direction is garbage
+        void main(){ vec4 v = uInvProj * vec4(position.xy, -1.0, 1.0); vRay = (uCamRot * vec4(v.xyz / v.w, 0.0)).xyz; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
       fragmentShader: /* glsl */ `
         uniform vec3 uCamPos; uniform vec3 uSun; uniform float uSunI; uniform float uFlash; varying vec3 vRay;
         ${ATMOSPHERE}
@@ -90,7 +92,7 @@ export class SkyLayer {
     sg.setAttribute('color', new THREE.BufferAttribute(col, 3));
     sg.setAttribute('size', new THREE.BufferAttribute(size, 1));
     this.starMat = new THREE.ShaderMaterial({
-      depthTest: false, depthWrite: false, transparent: true, blending: THREE.AdditiveBlending,
+      depthTest: false, depthWrite: false, transparent: false, blending: THREE.AdditiveBlending,
       uniforms: { uVis: { value: 1 }, uRot: { value: new THREE.Matrix3() } },
       vertexShader: /* glsl */ `attribute float size; attribute vec3 color; varying vec3 vC; uniform float uVis; uniform mat3 uRot;
         void main(){ vC = color * uVis; vec4 p = viewMatrix * vec4(uRot * position, 0.0); gl_Position = projectionMatrix * vec4(p.xyz * 1e6, 1.0); gl_Position.z = gl_Position.w * 0.999999; gl_PointSize = size; }`,

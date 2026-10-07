@@ -11,7 +11,7 @@ import { ATMOSPHERE, HAZE, LOGDEPTH_FRAG, LOGDEPTH_FRAG_PARS, LOGDEPTH_VERT, LOG
  * relative to a floating origin at the camera, so a person and a planet can share one scene without losing precision.
  */
 export const MAX_LEVEL = 14;
-const SPLIT = 2.4;
+const SPLIT = 3.2;
 
 interface Node {
   key: string;
@@ -27,6 +27,7 @@ interface Node {
   center?: [number, number, number];
   detailOff?: THREE.Vector3;
   heights?: Float32Array;
+  seg?: number;
   trees?: Float32Array;
   pending: boolean;
   used: number;
@@ -129,6 +130,7 @@ export class Terrain {
     m.visible = false;
     n.mesh = m;
     n.heights = r.heights;
+    n.seg = r.seg;
     n.minH = r.minH;
     n.maxH = r.maxH;
     this.group.add(m);
@@ -241,10 +243,11 @@ export class Terrain {
     }
     if (!best || !best.heights) return null;
     const k = 1 << best.level;
-    const a = (((f.s + 1) / 2) * k - best.i) * SEG, b = (((f.t + 1) / 2) * k - best.j) * SEG;
-    const a0 = Math.max(0, Math.min(SEG - 1, Math.floor(a))), b0 = Math.max(0, Math.min(SEG - 1, Math.floor(b)));
+    const S = best.seg ?? SEG;
+    const a = (((f.s + 1) / 2) * k - best.i) * S, b = (((f.t + 1) / 2) * k - best.j) * S;
+    const a0 = Math.max(0, Math.min(S - 1, Math.floor(a))), b0 = Math.max(0, Math.min(S - 1, Math.floor(b)));
     const u = Math.max(0, Math.min(1, a - a0)), v = Math.max(0, Math.min(1, b - b0));
-    const V = SEG + 1, hh = best.heights;
+    const V = S + 1, hh = best.heights;
     const A = hh[b0 * V + a0], B = hh[b0 * V + a0 + 1], C = hh[(b0 + 1) * V + a0], D = hh[(b0 + 1) * V + a0 + 1];
     return u + v <= 1 ? A + u * (B - A) + v * (C - A) : D + (1 - u) * (C - D) + (1 - v) * (B - D);
   }
@@ -308,7 +311,7 @@ function terrainMaterial(f: Fields): THREE.ShaderMaterial {
         float dist = length(vView);
         vec3 V = -vView / max(dist, 1e-6);
         vec2 uv = uvOf(d);
-        vec2 wuv = uv + (vec2(vnoise(d * 160.0), vnoise(d * 160.0 + 7.0)) - 0.5) * 0.006 + (vec2(vnoise(d * 900.0 + 3.0), vnoise(d * 900.0 + 11.0)) - 0.5) * 0.0012;
+        vec2 wuv = uv + (vec2(fbm3(d * 120.0), fbm3(d * 120.0 + 7.0)) - 0.5) * vec2(0.011, 0.016) + (vec2(vnoise(d * 700.0 + 3.0), vnoise(d * 700.0 + 11.0)) - 0.5) * vec2(0.003, 0.004);
         vec4 land = texture2D(uLand, wuv);
         vec4 aux = texture2D(uAux, wuv);
         vec4 clim = texture2D(uClimate, uv);
@@ -319,10 +322,22 @@ function terrainMaterial(f: Fields): THREE.ShaderMaterial {
         float slope = 1.0 - clamp(dot(N, d), 0.0, 1.0);
         // fine detail: seamless lattice noise near the camera, fading with distance
         vec3 lp = uDetailOff + vLocal;
-        float near = 1.0 - smoothstep(0.5, 6.0, dist);
         float mid = 1.0 - smoothstep(4.0, 60.0, dist);
-        float dn = fbm3(lp * 0.9) * mid + (fbm3(lp * 40.0) - 0.5) * 0.6 * near + (vnoise(lp * 300.0) - 0.5) * 0.35 * (1.0 - smoothstep(0.05, 0.8, dist));
-        vec3 alb = land.rgb * (0.82 + 0.36 * dn);
+        float near = 1.0 - smoothstep(0.3, 4.0, dist);
+        float vnear = 1.0 - smoothstep(0.02, 0.5, dist);
+        float n1 = fbm3(lp * 0.9);
+        float n2 = fbm3(lp * 33.0);
+        float n3 = vnoise(lp * 330.0);
+        float n4 = vnoise(lp * 2100.0);
+        float dn = (n1 - 0.5) * mid + (n2 - 0.5) * 0.55 * near + (n3 - 0.5) * 0.4 * vnear + (n4 - 0.5) * 0.3 * (1.0 - smoothstep(0.002, 0.04, dist));
+        vec3 alb = land.rgb * (1.0 + 0.42 * dn);
+        // dry and lush patches in living ground, bare earth showing through
+        float lushV = land.a;
+        alb = mix(alb, alb * vec3(1.18, 1.06, 0.72), smoothstep(0.55, 0.8, n2) * 0.4 * near * lushV);
+        alb = mix(alb, vec3(0.36, 0.3, 0.22), smoothstep(0.7, 0.85, n3) * 0.35 * vnear * (1.0 - lushV * 0.5));
+        // small-scale relief for the light to catch
+        vec3 rnd = vec3(vnoise(lp * 330.0 + 3.1), vnoise(lp * 330.0 + 7.7), vnoise(lp * 330.0 + 1.3)) - 0.5;
+        N = normalize(N + (rnd - d * dot(rnd, d)) * 0.5 * vnear + (vec3(n2, n1, n2) - 0.5 - d * dot(vec3(n2, n1, n2) - 0.5, d)) * 0.25 * near);
         // bare rock on steep and high ground; sand and shingle at the shore
         vec3 rockC = mix(vec3(0.42, 0.40, 0.37), vec3(0.55, 0.52, 0.47), fbm3(lp * 6.0));
         float rock = smoothstep(0.16, 0.42, slope + (dn - 0.5) * 0.12) + smoothstep(-1.0, -7.0, T) * 0.6 * (1.0 - land.a * 0.5);
@@ -330,7 +345,8 @@ function terrainMaterial(f: Fields): THREE.ShaderMaterial {
         float shore = (1.0 - smoothstep(0.0012, 0.0045 + dn * 0.002, h)) * (clim.b > 0.5 || h < 0.003 ? 1.0 : 0.0);
         alb = mix(alb, vec3(0.76, 0.69, 0.52), shore * 0.85);
         // snow: the simulated snowpack, plus cold ground above the local snow line; it slides off cliffs
-        float snow = max(aux.r, smoothstep(-0.5, -5.0, T + (dn - 0.5) * 3.0)) * (1.0 - smoothstep(0.35, 0.62, slope));
+        float snowField = smoothstep(0.25, 0.75, aux.r + (fbm3(d * 400.0) - 0.5) * 0.6);
+        float snow = max(snowField, smoothstep(-0.5, -5.0, T + (dn - 0.5) * 3.0)) * (1.0 - smoothstep(0.35, 0.62, slope));
         alb = mix(alb, vec3(0.93, 0.95, 0.98), clamp(snow, 0.0, 1.0));
         // towns: paved ground, roofs and, at night, street light
         float lightAmt = 0.0;
@@ -349,6 +365,8 @@ function terrainMaterial(f: Fields): THREE.ShaderMaterial {
         // political map
         vec4 pol = texture2D(uPolitics, wuv);
         alb = mix(alb, pol.rgb, pol.a * uPolOn * 0.6);
+        // the palette above is in sRGB; light in linear space
+        alb = pow(max(alb, vec3(0.0)), vec3(2.2));
         // lighting
         vec3 L = normalize(uSun);
         float sunUp = dot(d, L);
@@ -427,9 +445,10 @@ function waterMaterial(f: Fields): THREE.ShaderMaterial {
         float day = smoothstep(-0.1, 0.15, sunUp);
         float deep = 1.0 - exp(-vDepth / 0.025);
         vec3 shallow = vec3(0.07, 0.36, 0.38), abyss = vec3(0.008, 0.04, 0.1);
-        vec3 body = mix(shallow, abyss, deep) * (1.0 + streak * 0.6);
+        vec3 body = pow(mix(shallow, abyss, deep) * (1.0 + streak * 0.6), vec3(2.2));
         // sea ice where the water freezes
-        float ice = smoothstep(-1.2, -2.6, sst) * (1.0 - nearW * 0.3);
+        float floes = fbm3(d * 240.0) + (fbm3(lp * 3.0) - 0.5) * 0.4 * nearW;
+        float ice = smoothstep(-0.8, -2.4, sst + (floes - 0.5) * 2.5) * (1.0 - nearW * 0.2);
         vec3 skyC = mix(vec3(0.02, 0.03, 0.06), mix(vec3(0.85, 0.5, 0.3), vec3(0.45, 0.62, 0.9), smoothstep(0.0, 0.3, sunUp)), day);
         float fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
         vec3 R = reflect(-V, N);
@@ -437,7 +456,7 @@ function waterMaterial(f: Fields): THREE.ShaderMaterial {
         float ndl = max(dot(N, L), 0.0) * smoothstep(-0.03, 0.06, sunUp);
         vec3 sunCol = mix(vec3(1.0, 0.5, 0.25), vec3(1.0, 0.96, 0.9), smoothstep(0.0, 0.3, sunUp)) * uDust;
         vec3 col = body * (ndl * sunCol * 0.6 + day * 0.25 + 0.02) + skyC * fres * 0.9 + sunCol * spec;
-        col = mix(col, vec3(0.86, 0.9, 0.95) * (ndl * 1.1 * sunCol + 0.12 * day + 0.01), ice);
+        col = mix(col, vec3(0.72, 0.79, 0.88) * (ndl * 1.1 * sunCol + 0.12 * day + 0.01), ice);
         // surf where the water is shallow
         float foam = (1.0 - smoothstep(0.0, 0.0015, vDepth)) * smoothstep(0.4, 0.75, vnoise(lp * 600.0 + t * 0.6)) * nearW;
         col += vec3(0.8) * foam * (ndl + 0.1);

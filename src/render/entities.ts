@@ -442,6 +442,10 @@ export class Entities {
       }
     }
     // ---- forests from the terrain lattice, thinned by what the simulation says is growing there
+    const clearHash = new SpatialHash<{ p: [number, number, number]; r: number }>(0.12);
+    for (const g of clear) clearHash.add(g.p, g.r, g);
+    const groveHash = new SpatialHash<{ p: [number, number, number]; r: number; frac: number }>(0.6);
+    for (const g of groves) if (g.frac < 0.999) groveHash.add(g.p, g.r, g);
     const env = c.env;
     let ntr = 0;
     const nc = [0, 0, 0, 0];
@@ -465,10 +469,9 @@ export class Entities {
         const veg = env ? env.veg[cell] / 255 : base;
         if (hv > Math.min(1, (veg / base) * 1.15)) continue;
         let skip = false;
-        for (const g of clear) { if (Math.abs(g.p[0] - px) < g.r && Math.abs(g.p[1] - py) < g.r && Math.abs(g.p[2] - pz) < g.r && Math.hypot(g.p[0] - px, g.p[1] - py, g.p[2] - pz) < g.r) { skip = true; break; } }
+        for (const g of clearHash.near(px, py, pz)) { if (Math.hypot(g.p[0] - px, g.p[1] - py, g.p[2] - pz) < g.r) { skip = true; break; } }
         if (skip) continue;
-        for (const g of groves) {
-          if (g.frac >= 0.999) continue;
+        for (const g of groveHash.near(px, py, pz)) {
           if (Math.hypot(g.p[0] - px, g.p[1] - py, g.p[2] - pz) < g.r && ((hv * 7.13) % 1) > g.frac) { skip = true; break; }
         }
         if (skip) continue;
@@ -594,4 +597,27 @@ function greatCircle(ax: number, ay: number, bx: number, by: number, t: number):
   const east = new THREE.Vector3().crossVectors(up, north);
   const to = new THREE.Vector3(B[0] - d[0], B[1] - d[1], B[2] - d[2]);
   return { d, heading: Math.atan2(to.dot(east), to.dot(north)) };
+}
+
+/** Buckets things with a radius into a 3D grid so "what is near this point?" is cheap. */
+class SpatialHash<T> {
+  private m = new Map<string, T[]>();
+  private static EMPTY: never[] = [];
+  constructor(private cell: number) {}
+  private key(x: number, y: number, z: number) {
+    return `${Math.floor(x / this.cell)},${Math.floor(y / this.cell)},${Math.floor(z / this.cell)}`;
+  }
+  add(p: [number, number, number], r: number, v: T) {
+    const c = this.cell;
+    for (let x = Math.floor((p[0] - r) / c); x <= Math.floor((p[0] + r) / c); x++)
+      for (let y = Math.floor((p[1] - r) / c); y <= Math.floor((p[1] + r) / c); y++)
+        for (let z = Math.floor((p[2] - r) / c); z <= Math.floor((p[2] + r) / c); z++) {
+          const k = `${x},${y},${z}`;
+          const l = this.m.get(k);
+          if (l) l.push(v); else this.m.set(k, [v]);
+        }
+  }
+  near(x: number, y: number, z: number): T[] {
+    return this.m.get(this.key(x, y, z)) ?? (SpatialHash.EMPTY as T[]);
+  }
 }

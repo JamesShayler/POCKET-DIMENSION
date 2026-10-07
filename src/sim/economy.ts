@@ -133,7 +133,7 @@ function nextProjects(w: World, s: Settlement): { start: BKind[]; shopping: BKin
   if (w.planet.coastDist[c] <= 1 || w.planet.lake[c]) want('dock', 1 + Math.floor(pop / 700));
   want('factory', 1 + Math.floor(pop / 400));
   want('powerplant', 1 + Math.floor(pop / 1500));
-  want('airport', pop >= 900 ? 1 + Math.floor(pop / 6000) : 0);
+  want('airport', 1 + Math.floor(pop / 3000));
   const civ = w.civs[s.civ - 1];
   if (civ && civ.capital === s.id && !civ.members.some((id) => id !== s.id && w.buildings.count(id, 'launchpad', false) > 0)) want('launchpad', 1);
   void underway;

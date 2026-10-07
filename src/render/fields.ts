@@ -122,6 +122,29 @@ export class Fields {
         clim[i * 4 + 3] = p.lake[i] ? 255 : 0;
       }
     }
+    // sea cells hold no land colour of their own, but the coast can cross into them: borrow from land nearby (a few passes)
+    const has = new Uint8Array(N);
+    for (let i = 0; i < N; i++) has[i] = p.ocean[i] ? 0 : 1;
+    for (let pass = 0; pass < 3; pass++) {
+      const add: number[] = [];
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y * W + x;
+        if (has[i]) continue;
+        let r = 0, g = 0, b = 0, a = 0, s0 = 0, s3 = 0, n = 0;
+        for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= H) continue;
+          const j = yy * W + (((x + dx) % W) + W) % W;
+          if (!has[j]) continue;
+          r += land[j * 4]; g += land[j * 4 + 1]; b += land[j * 4 + 2]; a += land[j * 4 + 3]; s0 += aux[j * 4]; s3 += aux[j * 4 + 3]; n++;
+        }
+        if (!n) continue;
+        land[i * 4] = r / n; land[i * 4 + 1] = g / n; land[i * 4 + 2] = b / n; land[i * 4 + 3] = a / n;
+        aux[i * 4] = s0 / n; aux[i * 4 + 3] = s3 / n;
+        add.push(i);
+      }
+      for (const i of add) has[i] = 1;
+    }
     this.land.needsUpdate = true;
     this.aux.needsUpdate = true;
     this.climate.needsUpdate = true;

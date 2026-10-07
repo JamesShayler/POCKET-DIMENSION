@@ -172,7 +172,7 @@ export class Space {
       if (!pad) continue;
       const prog = this.program(civ.id);
       const crewedAge = pad.tech.has('spaceflight');
-      const rate = (crewedAge ? 0.9 : 0.35) * clamp(civ.pop / 8000, 0.3, 2);
+      const rate = (crewedAge ? 0.9 : 0.35) * clamp(civ.pop / 3000, 0.3, 2);
       if (rng.next() > 1 - Math.exp(-rate)) continue;
       prog.launches++;
       const failRate = Math.max(0.03, 0.35 - prog.launches * 0.02);

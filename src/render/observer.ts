@@ -43,6 +43,9 @@ export class ObserverView {
   private lastDrawn = '';
   selected: { kind: string; id: number; extra?: number } | null = null;
   private dust = 1;
+  private lastPhase = 0;
+  /** keep a chosen sun position while paused (used for stills) */
+  holdPhase = false;
 
   constructor(private c: SimClient, readonly canvas: HTMLCanvasElement, private labelLayer: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance', logarithmicDepthBuffer: true });
@@ -189,17 +192,19 @@ export class ObserverView {
     const dps = c.daysPerSec;
     this.clock += c.paused ? dt * 0.15 : dt;
     // the sun: its true position when time runs slowly enough to follow; a held afternoon when days would strobe
-    if (dps <= 0.5) this.visualPhase = -Math.PI * 2 * (day - Math.floor(day));
+    if (dps <= 0.5 && !(c.paused && this.holdPhase)) this.visualPhase = -Math.PI * 2 * (day - Math.floor(day));
     else if (!c.paused) {
       let d = this.rig.lon - 0.7 - this.visualPhase;
       d = Math.atan2(Math.sin(d), Math.cos(d));
       this.visualPhase += d * (1 - Math.exp(-dt * 1.2));
     }
-    // in deep space the camera turns with the stars, not with the spinning planet
-    if (this.rig.alt > 60000) {
-      const prevSun = this.sky?.heavens.sunDir;
-      void prevSun;
+    // in deep space the camera turns with the stars, not with the spinning planet beneath it
+    if (this.rig.alt > 60000 && !this.follow) {
+      let d = this.visualPhase - this.lastPhase;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      this.rig.lon += d;
     }
+    this.lastPhase = this.visualPhase;
     this.keyboard(dt);
     this.rig.update(dt);
     this.sky.heavens.update(day, this.visualPhase);

@@ -9,7 +9,9 @@ import { H, R_KM, W } from '../sim/grid';
  * crosses sea level.
  */
 
-export const SEG = 32; // quads per chunk edge
+export const SEG = 32; // quads per chunk edge (fine levels)
+/** Coarse tiles seen from orbit get twice the vertices, so coasts stay crisp from far away. */
+export const segFor = (level: number) => (level <= 5 ? 64 : SEG);
 export const TREE_LEVEL = 10; // chunks at or below this size carry individual trees
 export const TREE_GRID = 1 << 17; // global tree lattice per cube face (≈12 m spacing)
 
@@ -83,7 +85,8 @@ export interface ChunkResult {
   dir: Float32Array; // unit direction per vertex (for texture lookups)
   elev: Float32Array; // km above sea level per vertex
   index: Uint32Array;
-  heights: Float32Array; // (SEG+1)² surface heights for placing things on the ground
+  heights: Float32Array; // (seg+1)² surface heights for placing things on the ground
+  seg: number;
   water?: { pos: Float32Array; depth: Float32Array; dir: Float32Array; index: Uint32Array };
   trees?: Float32Array; // stride 8: x y z height crown type hue cell
   minH: number;
@@ -185,7 +188,19 @@ export class TerrainGen {
           if (r.dist < half) water = bank - r.d * 0.25;
         }
       }
-      if (this.d.lake[cell] && h < this.d.lakeLevel[cell] + 0.001) water = Math.max(isNaN(water) ? -1e9 : water, this.d.lakeLevel[cell]);
+      // lakes: the water of a lake cell also floods low ground just across its edge, so shores follow the land, not the grid
+      const cx = Math.floor(mx), cy = Math.floor(my);
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const yy = cy + dy;
+        if (yy < 0 || yy >= H) continue;
+        const c2 = yy * W + ((((cx + dx) % W) + W) % W);
+        if (!this.d.lake[c2]) continue;
+        const ex = Math.max(0, Math.abs(mx - (cx + dx + 0.5)) - 0.5), ey = Math.max(0, Math.abs(my - (yy + 0.5)) - 0.5);
+        if (Math.hypot(ex, ey) > 0.45) continue;
+        const lvl = this.d.lakeLevel[c2];
+        if (h < lvl + 0.001) water = Math.max(isNaN(water) ? -1e9 : water, lvl);
+      }
+      void cell;
       h = Math.max(h, 0.0005);
     }
     out.h = h;
@@ -195,6 +210,7 @@ export class TerrainGen {
 
   chunk(face: number, level: number, i: number, j: number, key: string): ChunkResult {
     const n = 1 << level;
+    const SEG = segFor(level);
     const s0 = -1 + (2 * i) / n, t0 = -1 + (2 * j) / n;
     const ds = 2 / n / SEG;
     const sizeKm = ((Math.PI / 2) * R_KM) / n;
@@ -275,7 +291,7 @@ export class TerrainGen {
         index.push(a0, b0, a1, a1, b0, b1);
       }
     }
-    const res: ChunkResult = { key, center, pos, normal, dir, elev, index: Uint32Array.from(index), heights, minH, maxH };
+    const res: ChunkResult = { key, center, pos, normal, dir, elev, index: Uint32Array.from(index), heights, minH, maxH, seg: SEG };
     // ---- water surface (sea, lakes, rivers)
     let anyWater = false;
     for (let b = 1; b <= SEG + 1 && !anyWater; b++) for (let a = 1; a <= SEG + 1; a++) if (!isNaN(Wt[b * G + a])) { anyWater = true; break; }
@@ -304,11 +320,11 @@ export class TerrainGen {
       if (widx.length) res.water = { pos: wpos, depth: wdepth, dir: wdir, index: Uint32Array.from(widx) };
     }
     // ---- trees and boulders, on a fixed global lattice so they never move when detail changes
-    if (level >= TREE_LEVEL) res.trees = this.scatter(face, level, i, j, center, heights, Wt, G);
+    if (level >= TREE_LEVEL) res.trees = this.scatter(face, level, i, j, center, heights, Wt, G, SEG);
     return res;
   }
 
-  private scatter(face: number, level: number, i: number, j: number, center: [number, number, number], heights: Float32Array, Wt: Float32Array, G: number): Float32Array {
+  private scatter(face: number, level: number, i: number, j: number, center: [number, number, number], heights: Float32Array, Wt: Float32Array, G: number, SEG: number): Float32Array {
     const d = this.d;
     const n = 1 << level;
     const per = TREE_GRID / n; // lattice points per chunk edge
