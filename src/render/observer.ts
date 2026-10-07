@@ -337,7 +337,14 @@ export class ObserverView {
       if (alt > 3e6 && this.project([0, 0, 0], origin, o)) out.push({ s: 'Home', x: o.x, y: o.y + 10, w: 2e6, cls: 'label body' });
     }
     out.sort((a, b) => b.w - a.w);
-    const show = out.slice(0, 30);
+    // most important first; a label that would overlap one already placed is left out
+    const show: typeof out = [];
+    for (const l of out) {
+      if (show.length >= 30) break;
+      const hw = l.s.length * 4 + 6;
+      if (show.some((k) => Math.abs(k.x - l.x) < hw + k.s.length * 4 + 6 && Math.abs(k.y - l.y) < 16)) continue;
+      show.push(l);
+    }
     while (this.labels.length < show.length) {
       const el = document.createElement('div');
       this.labelLayer.appendChild(el);

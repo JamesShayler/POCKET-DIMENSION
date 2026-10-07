@@ -239,9 +239,13 @@ function cloudMaterial(f: Fields, altKm: number, layer: number): THREE.ShaderMat
       void main(){
         ${LOGDEPTH_FRAG}
         vec3 d = normalize(vDir);
-        vec2 uv = uvOf(d);
+        // the weather grid is ~50 km: warp the lookup and break up the cover with large-scale noise so cloud masses
+        // seen from orbit have ragged, drifting edges instead of following the grid
+        vec3 dw = d * 30.0 + uWind * 0.02;
+        vec2 uv = uvOf(d) + (vec2(fbm3(dw), fbm3(dw + 7.0)) - 0.5) * vec2(0.016, 0.028);
         vec4 wx = texture2D(uWeather, uv);
         float cover = ${layer === 0 ? 'wx.r' : 'smoothstep(0.25, 0.9, wx.r) * 0.8 + 0.12'};
+        cover = clamp(cover + (fbm3(d * ${layer === 0 ? '14.0' : '8.0'} + uWind * 0.03 + 3.0) - 0.5) * 0.5, 0.0, 1.0);
         // storms: a swirling spiral with a clear eye
         vec3 p = d;
         float swirl = 0.0;
