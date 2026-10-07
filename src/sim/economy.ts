@@ -44,7 +44,8 @@ export function economySeason(w: World, s: Settlement) {
   // --- everybody burns wood for cooking and warmth
   {
     const cold = clamp(1.3 - (s.tech.has('fire') ? 0.0 : 0) - (w.env.regionTemp[0] * 0), 0.8, 1.4);
-    const fuel = Math.min(s.res.wood, s.pop * 0.3 * 90 * cold * 0.5);
+    // (timber set aside for a great work is not burned: it is the one stack the town keeps dry)
+    const fuel = Math.min(Math.max(0, s.res.wood - (s.reserve?.wood ?? 0)), s.pop * 0.3 * 90 * cold * 0.5);
     s.res.wood -= fuel;
   }
   // goods wear out, are used up and are given away
@@ -54,7 +55,7 @@ export function economySeason(w: World, s: Settlement) {
   if (docks) {
     s.ships *= 0.97; // wrecks and wear
     const wantShips = docks * 4 + s.pop / 120;
-    if (s.ships < wantShips && s.res.wood > 70) { s.res.wood -= 50; s.ships += 1; }
+    if (s.ships < wantShips && s.res.wood - (s.reserve?.wood ?? 0) > 70) { s.res.wood -= 50; s.ships += 1; }
   } else s.ships *= 0.8;
   // factories turn materials into goods; their smoke and clearings spread around the town
   const factories = w.buildings.count(s.id, 'factory');
