@@ -13,6 +13,9 @@ const has = (s: Settlement, t: string) => (s.tech as Set<string>).has(t);
 
 /** Per-capita stock a community would like to hold. */
 const WANT: Record<string, number> = { wood: 6, stone: 4, clay: 3, copper: 0.35, iron: 0.35, coal: 0.4, metal: 0.25, goods: 0.6, gold: 0 };
+const GREAT_WORKS: BKind[] = ['wall', 'factory', 'powerplant', 'airport', 'launchpad'];
+/** Buildings a town never postpones to save for a great work. */
+const ESSENTIAL: BKind[] = ['hut', 'granary', 'well', 'hall', 'dock'];
 const BASE_PRICE: Record<string, number> = { wood: 1, stone: 1.4, clay: 1.2, copper: 5, iron: 4, coal: 2, gold: 60, metal: 12, goods: 3, food: 1 };
 
 export function stockOf(s: Settlement, k: string): number {
@@ -35,17 +38,34 @@ export function economySeason(w: World, s: Settlement) {
   // --- tools wear out and are replaced
   if (!has(s, 'tools')) s.toolTier = 0;
   else if (has(s, 'metallurgy') && s.res.metal > 1 && w.buildings.count(s.id, 'smithy') > 0) {
-    s.toolTier = 2;
+    s.toolTier = has(s, 'ironworking') && s.res.iron + s.res.metal > 3 ? 3 : 2;
     s.res.metal = Math.max(0, s.res.metal - Math.max(0.05, s.pop * 0.002));
   } else s.toolTier = 1;
   // --- everybody burns wood for cooking and warmth
   {
     const cold = clamp(1.3 - (s.tech.has('fire') ? 0.0 : 0) - (w.env.regionTemp[0] * 0), 0.8, 1.4);
-    const fuel = Math.min(s.res.wood, s.pop * 0.3 * 90 * cold * 0.5);
+    // (timber set aside for a great work is not burned: it is the one stack the town keeps dry)
+    const fuel = Math.min(Math.max(0, s.res.wood - (s.reserve?.wood ?? 0)), s.pop * 0.3 * 90 * cold * 0.5);
     s.res.wood -= fuel;
   }
   // goods wear out, are used up and are given away
   s.goods *= 0.93;
+  // shipwrights at the docks keep a small fleet afloat
+  const docks = w.buildings.count(s.id, 'dock');
+  if (docks) {
+    s.ships *= 0.97; // wrecks and wear
+    const wantShips = docks * 4 + s.pop / 120;
+    if (s.ships < wantShips && s.res.wood - (s.reserve?.wood ?? 0) > 70) { s.res.wood -= 50; s.ships += 1; }
+  } else s.ships *= 0.8;
+  // factories turn materials into goods; their smoke and clearings spread around the town
+  const factories = w.buildings.count(s.id, 'factory');
+  if (factories) {
+    const use = Math.min(s.res.wood * 0.2, factories * 30);
+    s.res.wood -= use;
+    s.goods += factories * 25 + use * 1.5;
+    const ci = idx(wrapX(Math.floor(s.x)), Math.floor(s.y));
+    w.env.veg[ci] = Math.max(0.05, w.env.veg[ci] - 0.01 * factories);
+  }
   // --- housing
   s.housing = w.buildings.capacity(s.id);
   // --- fields: crops ripen, weeds creep
@@ -69,6 +89,8 @@ export function economySeason(w: World, s: Settlement) {
   const pop = Math.max(1, s.pop);
   let pending: Partial<Record<ResKey, number>> = {};
   const plan = nextProjects(w, s);
+  const greatWork = plan.start.find((k) => GREAT_WORKS.includes(k));
+  s.reserve = greatWork ? { ...BDEFS[greatWork].cost } : undefined;
   for (const k of plan.shopping) for (const rk of Object.keys(BDEFS[k].cost) as ResKey[]) pending[rk] = (pending[rk] ?? 0) + (BDEFS[k].cost[rk] ?? 0);
   for (const b of w.buildings.of(s.id)) if (b.done < 0 && b.progress < 1) { /* materials were reserved at the start */ }
   const target = (k: ResKey, per: number) => per * pop + 12 + (pending[k] ?? 0) * 1.1;
@@ -76,8 +98,10 @@ export function economySeason(w: World, s: Settlement) {
   need.stone = has(s, 'tools') ? clamp(1 - r.stone / target('stone', WANT.stone)) : 0;
   need.clay = has(s, 'pottery') ? clamp(1 - r.clay / target('clay', WANT.clay)) : 0;
   const smith = has(s, 'metallurgy');
-  need.ore = smith ? clamp(1 - (r.copper + r.iron) / target('copper', WANT.copper * 2)) : 0;
-  need.coal = smith ? clamp(1 - r.coal / target('coal', WANT.coal)) : 0;
+  // metal is smelted from two measures of ore and one of coal, so saving for metal means mining for it
+  const forMetal = pending.metal ?? 0;
+  need.ore = smith ? clamp(1 - (r.copper + r.iron) / (target('copper', WANT.copper * 2) + Math.max(0, forMetal - r.metal) * 2.2)) : 0;
+  need.coal = smith ? clamp(1 - r.coal / (target('coal', WANT.coal) + Math.max(0, forMetal - r.metal) * 1.1)) : 0;
   s.need = need;
   // --- start new construction when we can afford it
   startProjects(w, s, plan);
@@ -106,12 +130,30 @@ function nextProjects(w: World, s: Settlement): { start: BKind[]; shopping: BKin
   want('workshop', 1 + Math.floor(pop / 160));
   want('kiln', 1 + Math.floor(pop / 220));
   want('granary', 1 + Math.floor(pop / 160));
+  // a harbour comes early for a town by the water: fishing boats, then trade and war fleets
+  const c = idx(wrapX(Math.floor(s.x)), Math.floor(s.y));
+  if ((w.planet.coastDist[c] <= 1 || w.planet.lake[c]) && has(s, 'navigation') && B.hasShore(s)) want('dock', 1 + Math.floor(pop / 700));
   if (has(s, 'metallurgy') && (s.res.copper + s.res.iron > 4)) want('smithy', 1 + Math.floor(pop / 320));
   want('market', (s.occupations['trader'] ?? 0) > 0 || pop >= 150 ? 1 + Math.floor(pop / 500) : 0);
   want('temple', (s.occupations['priest'] ?? 0) > 0 ? 1 + Math.floor(pop / 700) : 0);
   want('tower', s.threat > 0.25 ? 1 + Math.floor(pop / 250) : 0);
+  // walls: a palisade first, stone when the town can afford masons
+  const raided = s.threat > 0.25 || w.day - s.lastRaid < 4 * DAYS_PER_YEAR;
+  if (raided) { if (has(s, 'architecture') && pop >= BDEFS.wall.minPop) want('wall', 1); else if (!cnt('wall')) want('palisade', 1); }
+  want('factory', 1 + Math.floor(pop / 400));
+  want('powerplant', 1 + Math.floor(pop / 1500));
+  want('airport', 1 + Math.floor(pop / 3000));
+  const civ = w.civs[s.civ - 1];
+  // a state builds one launch site, at its largest town (often, but not always, the capital)
+  if (civ && !civ.members.some((id) => id !== s.id && w.buildings.count(id, 'launchpad', false) > 0)
+    && civ.members.every((id) => id === s.id || (w.settlements[id - 1]?.pop ?? 0) <= pop)) want('launchpad', 1);
   void underway;
-  return { start: out, shopping: out.slice(0, 2) };
+  // the town shops for its next two wishes, and also saves toward its first great work (these cost far more than a
+  // season's gathering, so without saving for them they would never be afforded)
+  const shopping = out.slice(0, 2);
+  const great = out.find((k) => GREAT_WORKS.includes(k) && !shopping.includes(k));
+  if (great) shopping.push(great);
+  return { start: out, shopping };
 }
 
 function startProjects(w: World, s: Settlement, plan: { start: BKind[] }) {
@@ -120,18 +162,29 @@ function startProjects(w: World, s: Settlement, plan: { start: BKind[] }) {
   const builders = s.occupations['builder'] ?? 0;
   const slots = 1 + Math.floor(builders / 3) - active;
   let started = 0;
+  let homeStarted = false;
   const homeless = s.pop - B.of(s.id).reduce((a, b) => a + (b.done >= -1 ? BDEFS[b.kind].cap : 0), 0);
-  for (const k of plan.start) {
+  // while saving for a great work, its materials are set aside: other projects may only use what lies beyond the
+  // reserve (essentials excepted), so houses go up in timber or brick rather than eating the stone for a wall or a pad
+  const great = plan.start.find((k) => GREAT_WORKS.includes(k));
+  const reserve: Partial<Record<string, number>> = s.reserve ?? {};
+  // a great work the town has finally saved enough for goes first, ahead of the endless queue of houses
+  const ready = great && (Object.keys(BDEFS[great].cost) as ResKey[]).every((rk) => s.res[rk] >= (BDEFS[great].cost[rk] ?? 0));
+  const order = ready ? [great, ...plan.start.filter((k) => k !== great)] : plan.start;
+  for (const k of order) {
     if (started >= slots) break;
     const isHome = HOUSING.includes(k);
-    // among housing tiers only the best affordable one is built (or a hut if people are freezing)
+    // among housing tiers only the best affordable one is built (or a hut if people are freezing); a new house
+    // does not stop the town starting something else if it has the builders for it
+    if (isHome && homeStarted) continue;
     const def = BDEFS[k];
-    const afford = (Object.keys(def.cost) as ResKey[]).every((rk) => s.res[rk] >= (def.cost[rk] ?? 0));
+    const held = k === great || ESSENTIAL.includes(k) ? {} : reserve;
+    const afford = (Object.keys(def.cost) as ResKey[]).every((rk) => s.res[rk] - (held[rk] ?? 0) >= (def.cost[rk] ?? 0));
     if (!afford) continue;
     if (isHome && homeless <= 1) continue;
     if (B.start(s, k)) {
       started++;
-      if (isHome) break;
+      if (isHome) homeStarted = true;
     }
   }
 }
@@ -232,7 +285,8 @@ function planTrade(w: World, s: Settlement) {
     if (w.landComp[idx(wrapX(Math.floor(o.x)), Math.floor(o.y))] !== comp && !(has(s, 'navigation') && w.landCompBoat[idx(wrapX(Math.floor(o.x)), Math.floor(o.y))] === w.landCompBoat[idx(wrapX(Math.floor(s.x)), Math.floor(s.y))])) continue;
     if (w.diplomacy.atWar(s.civ, o.civ)) continue;
     for (const give of keys) {
-      const surplus = stockOf(s, give) - 1.4 * (WANT[give] ?? 0.5) * s.pop - 6;
+      // what is set aside for a great work is not for sale
+      const surplus = stockOf(s, give) - 1.4 * (WANT[give] ?? 0.5) * s.pop - 6 - (s.reserve?.[give] ?? 0);
       if (surplus < 4) continue;
       for (const get of [...keys, 'gold']) {
         if (get === give) continue;

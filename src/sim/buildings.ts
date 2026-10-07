@@ -11,7 +11,8 @@ export const emptyStock = (): Stock => ({ wood: 0, stone: 0, clay: 0, copper: 0,
 
 export type BKind =
   | 'hut' | 'house' | 'brickhouse' | 'stonehouse' | 'granary' | 'workshop' | 'kiln' | 'smithy'
-  | 'market' | 'temple' | 'hall' | 'tower' | 'well' | 'field';
+  | 'market' | 'temple' | 'hall' | 'tower' | 'well' | 'field'
+  | 'dock' | 'palisade' | 'wall' | 'factory' | 'powerplant' | 'airport' | 'launchpad';
 
 export interface BDef {
   name: string;
@@ -39,7 +40,16 @@ export const BDEFS: Record<BKind, BDef> = {
   tower: { name: 'Watchtower', cost: { stone: 170, wood: 50 }, labor: 300, cap: 0, size: 0.012, tech: ['architecture'], minPop: 60 },
   well: { name: 'Well', cost: { stone: 50 }, labor: 80, cap: 0, size: 0.006, tech: ['tools'], minPop: 40 },
   field: { name: 'Field', cost: {}, labor: 150, cap: 0, size: 0.1, tech: ['agriculture'], minPop: 0 },
+  dock: { name: 'Dock', cost: { wood: 100 }, labor: 260, cap: 0, size: 0.03, tech: ['navigation'], minPop: 25 },
+  palisade: { name: 'Palisade', cost: { wood: 260 }, labor: 380, cap: 0, size: 0, tech: ['tools'], minPop: 60 },
+  wall: { name: 'Town wall', cost: { stone: 700, wood: 60 }, labor: 1800, cap: 0, size: 0, tech: ['architecture'], minPop: 140 },
+  factory: { name: 'Factory', cost: { stone: 300, wood: 100, metal: 40 }, labor: 1500, cap: 0, size: 0.06, tech: ['industry'], minPop: 100 },
+  powerplant: { name: 'Power station', cost: { stone: 400, metal: 80 }, labor: 2400, cap: 0, size: 0.07, tech: ['electricity'], minPop: 140 },
+  airport: { name: 'Airport', cost: { stone: 700, metal: 60 }, labor: 4000, cap: 0, size: 0.5, tech: ['flight'], minPop: 160 },
+  launchpad: { name: 'Launch site', cost: { stone: 900, metal: 220 }, labor: 9000, cap: 0, size: 0.25, tech: ['rocketry'], minPop: 180 },
 };
+/** Ring defences: drawn around the whole town, not placed as a single footprint. */
+export const RINGS: BKind[] = ['palisade', 'wall'];
 export const HOUSING: BKind[] = ['hut', 'house', 'brickhouse', 'stonehouse'];
 
 export interface Building {
@@ -61,11 +71,16 @@ export interface Building {
   residents: number;
 }
 
+/** A point just inland of the waterline around a town: where it is, which way the water lies, and how far out (km). */
+interface ShorePoint { x: number; y: number; rot: number; r: number }
+
 export class Buildings {
   list: Building[] = [];
   /** per settlement: its buildings (a cached array, never copy it in hot paths) */
   bySettlement = new Map<number, Building[]>();
   private static EMPTY: Building[] = [];
+  /** shoreline points around a town, a pure function of its position (so caching it never changes the history) */
+  private shoreMemo = new Map<string, ShorePoint[]>();
 
   constructor(private world: World) {}
 
@@ -89,35 +104,137 @@ export class Buildings {
   }
 
   /** Organic placement: a growing, jittered rosette around the centre with spacing; fields on fertile ground further out. */
-  place(s: Settlement, kind: BKind, rng: Rng): { x: number; y: number } | null {
+  place(s: Settlement, kind: BKind, rng: Rng): { x: number; y: number; rot?: number } | null {
     const w = this.world;
     const p = w.planet;
     const mine = this.of(s.id);
     const def = BDEFS[kind];
     const isField = kind === 'field';
     const n = mine.length;
+    if (RINGS.includes(kind)) return { x: s.x, y: s.y };
+    if (kind === 'dock') {
+      // a dock stands on the town's own nearest shore, just inland of the waterline, its pier reaching out over the water
+      const pts = this.shore(s);
+      if (!pts.length) return null;
+      const rMin = Math.min(...pts.map((c) => c.r));
+      const near = pts.filter((c) => c.r <= Math.max(rMin * 1.5, rMin + 1));
+      for (const list of [near, pts]) {
+        const k0 = rng.int(list.length);
+        for (let q = 0; q < list.length; q++) {
+          const c = list[(k0 + q) % list.length];
+          if (mine.some((b) => Math.hypot(wrapDx(c.x, b.x) * kmPerCellX(c.y), (c.y - b.y) * KM_PER_CELL_Y) < (def.size + BDEFS[b.kind].size) * 1.15 + 0.004)) continue;
+          return { x: ((c.x % W) + W) % W, y: c.y, rot: c.rot };
+        }
+      }
+      return null;
+    }
+    if (isField) {
+      // farmland grows as a patchwork: most new fields are laid against an existing one, square to it
+      const fields = mine.filter((b) => b.kind === 'field');
+      if (fields.length && rng.next() < 0.8) {
+        const step = def.size * 1.04;
+        for (let attempt = 0; attempt < 12; attempt++) {
+          const f = fields[rng.int(fields.length)];
+          const side = rng.int(4);
+          const lx = side === 0 ? step : side === 1 ? -step : 0, ly = side === 2 ? step : side === 3 ? -step : 0;
+          const cr = Math.cos(f.rot), sr = Math.sin(f.rot);
+          const y = f.y + (lx * sr + ly * cr) / KM_PER_CELL_Y;
+          if (y < 0.2 || y > H - 0.2) continue;
+          const x = f.x + (lx * cr - ly * sr) / kmPerCellX(y);
+          const cell = idx(wrapX(Math.floor(x)), Math.floor(y));
+          if (p.ocean[cell] || w.env.fert[cell] < 0.12 || !p.isLand(x, y, 0.004)) continue;
+          if (!this.fieldFits(mine, x, y, f.rot)) continue;
+          return { x: ((x % W) + W) % W, y, rot: f.rot };
+        }
+      }
+    }
+    const far = kind === 'factory' || kind === 'powerplant' ? [0.5, 1.6] : kind === 'airport' ? [2.5, 4] : kind === 'launchpad' ? [5, 9] : null;
     for (let attempt = 0; attempt < 30; attempt++) {
       // radial density falls off from the centre; civic buildings stay central
       const civic = kind === 'hall' || kind === 'market' || kind === 'temple' || kind === 'well';
-      const rKm = isField ? 0.5 + Math.sqrt(rng.next()) * (1.2 + Math.sqrt(s.pop) * 0.12 + n * 0.01) : civic ? 0.03 + rng.next() * 0.12 : 0.05 + Math.sqrt(rng.next()) * (0.12 + Math.sqrt(n + 3) * 0.075);
+      const rKm = far ? far[0] + rng.next() * (far[1] - far[0]) : isField ? 0.25 + Math.sqrt(rng.next()) * (0.4 + Math.sqrt(s.pop) * 0.04 + n * 0.002) : civic ? 0.03 + rng.next() * 0.12 : 0.03 + Math.sqrt(rng.next()) * (0.06 + Math.sqrt(n + 3) * 0.042);
       const ang = rng.next() * Math.PI * 2;
       const y = s.y + (Math.sin(ang) * rKm) / KM_PER_CELL_Y;
       if (y < 0.2 || y > H - 0.2) continue;
       const x = s.x + (Math.cos(ang) * rKm) / kmPerCellX(y);
       const xi = wrapX(Math.floor(x));
       const cell = idx(xi, Math.floor(y));
-      if (p.ocean[cell] || p.lake[cell] || p.elev[cell] > 3.2) continue;
+      if (p.ocean[cell] || p.elev[cell] > 3.2 || !p.isLand(x, y, 0.004)) continue;
       let ok = true;
-      for (const b of mine) {
+      if (isField) ok = this.fieldFits(mine, x, y);
+      else for (const b of mine) {
         const kx = kmPerCellX(y);
         const d = Math.hypot(wrapDx(x, b.x) * kx, (y - b.y) * KM_PER_CELL_Y);
-        if (d < (def.size + BDEFS[b.kind].size) * (isField ? 0.8 : 1.15) + 0.004) { ok = false; break; }
+        if (d < (def.size + BDEFS[b.kind].size) * 1.15 + 0.004) { ok = false; break; }
       }
       if (!ok) continue;
       if (isField && w.env.fert[cell] < 0.12) continue;
       return { x: ((x % W) + W) % W, y };
     }
     return null;
+  }
+
+  /**
+   * A field may touch another field edge to edge when it is laid square to it (same rotation); a field at any other
+   * angle keeps a full diagonal away (squares can overlap up to size·√2 apart), and every field keeps clear of buildings.
+   * `rot` is the new field's rotation, or undefined if it will be chosen later (then it may be at any angle).
+   */
+  private fieldFits(mine: Building[], x: number, y: number, rot?: number): boolean {
+    const size = BDEFS.field.size, kx = kmPerCellX(y);
+    for (const b of mine) {
+      const dx = wrapDx(x, b.x) * kx, dy = (y - b.y) * KM_PER_CELL_Y;
+      if (b.kind !== 'field') {
+        if (Math.hypot(dx, dy) < size * 0.5 + BDEFS[b.kind].size + 0.004) return false;
+        continue;
+      }
+      if (rot !== undefined && Math.abs(rot - b.rot) < 1e-6) {
+        // in the other field's own frame (the same convention the patchwork step uses)
+        const c = Math.cos(b.rot), sn = Math.sin(b.rot);
+        const u = dx * c + dy * sn, v = -dx * sn + dy * c;
+        if (Math.max(Math.abs(u), Math.abs(v)) < size * 0.97) return false;
+      } else if (Math.hypot(dx, dy) < size * Math.SQRT2 + 0.004) return false;
+    }
+    return true;
+  }
+
+  /** Whether the town has any water within reach of a harbour (pure in its position, like `shore`). */
+  hasShore(s: Settlement): boolean {
+    return this.shore(s).length > 0;
+  }
+
+  /** Where the water begins around a town: along 24 bearings, the first sea or lake within 24 km, found to a few metres. */
+  private shore(s: Settlement): ShorePoint[] {
+    const key = `${s.id}:${s.x}:${s.y}`;
+    const hit = this.shoreMemo.get(key);
+    if (hit) return hit;
+    const p = this.world.planet;
+    const at = (ca: number, sa: number, r: number) => {
+      const y = s.y + (sa * r) / KM_PER_CELL_Y;
+      return { x: s.x + (ca * r) / kmPerCellX(y), y };
+    };
+    const out: ShorePoint[] = [];
+    for (let k = 0; k < 24; k++) {
+      const ang = (k / 24) * Math.PI * 2 + 0.1;
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      let lo = 0, hi = -1;
+      for (let r = 0.25; r <= 24; r += 0.25) {
+        const q = at(ca, sa, r);
+        if (q.y < 0.2 || q.y > H - 0.2) break;
+        if (!p.isLand(q.x, q.y, 0.0)) { hi = r; break; }
+        lo = r;
+      }
+      if (hi < 0) continue;
+      for (let it = 0; it < 6; it++) {
+        const m = (lo + hi) / 2, q = at(ca, sa, m);
+        if (p.isLand(q.x, q.y, 0.0)) lo = m; else hi = m;
+      }
+      const q = at(ca, sa, Math.max(0.03, lo - 0.012));
+      // facing the water: the renderer's heading turns local +z toward north·cos + east·sin, the pier runs along −z,
+      // and the simulation's y grows southward, so the pier points down this bearing when rot = ang − π/2
+      if (p.isLand(q.x, q.y, 0.0)) out.push({ x: q.x, y: q.y, rot: ang - Math.PI / 2, r: lo });
+    }
+    this.shoreMemo.set(key, out);
+    return out;
   }
 
   start(s: Settlement, kind: BKind, spend = true): Building | null {
@@ -131,7 +248,7 @@ export class Buildings {
     if (!pos) return null;
     if (spend) for (const k of Object.keys(def.cost) as ResKey[]) s.res[k] -= def.cost[k] ?? 0;
     const b: Building = {
-      id: this.list.length + 1, sid: s.id, kind, x: pos.x, y: pos.y, rot: rng.next() * Math.PI, progress: 0, started: w.day, done: -1,
+      id: this.list.length + 1, sid: s.id, kind, x: pos.x, y: pos.y, rot: pos.rot ?? rng.next() * Math.PI, progress: 0, started: w.day, done: -1,
       fstate: 0, planted: -1, weeds: 0, crop: 0, lastWork: w.day, residents: 0,
     };
     this.list.push(b);
@@ -153,11 +270,11 @@ export class Buildings {
   }
 
   /** Return destroyed/abandoned buildings of a settlement to the wild. */
-  destroy(sid: number, fraction: number, rng: Rng): number {
+  destroy(sid: number, fraction: number, rng: Rng, weight?: (b: Building) => number): number {
     let n = 0;
     const keep: Building[] = [];
     for (const b of this.of(sid)) {
-      if (rng.next() < fraction) { b.progress = 0; b.done = -2; n++; } else keep.push(b);
+      if (rng.next() < fraction * (weight ? weight(b) : 1)) { b.progress = 0; b.done = -2; n++; } else keep.push(b);
     }
     this.bySettlement.set(sid, keep);
     return n;

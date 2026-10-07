@@ -1,6 +1,6 @@
 import { Noise3 } from './noise';
 import { Rng, clamp, smoothstep } from './rng';
-import { W, H, N, NBR8, cellLat, cellLon, dirFromLonLat, idx } from './grid';
+import { W, H, N, NBR8, cellLat, cellLon, dirFromLonLat, idx, lonOfX, latOfY } from './grid';
 import { seasonPhase } from './time';
 
 export enum Biome {
@@ -12,28 +12,8 @@ export const BIOME_NAMES = [
   'Desert', 'Rainforest', 'Swamp', 'Mountains', 'Snow peaks', 'Volcanic', 'Lake',
 ];
 
-/** Terrain as a pure function of direction on the unit sphere: renderer can sample it at any resolution. */
-export class TerrainSampler {
-  noise: Noise3;
-  seaLevel = 0;
-  constructor(seed: number) {
-    this.noise = new Noise3(Rng.derive(seed, 'terrain').state);
-  }
-  raw(x: number, y: number, z: number): number {
-    const n = this.noise;
-    const cont = n.fbm(x * 0.95 + 3.1, y * 0.95 + 1.7, z * 0.95 - 2.3, 5, 2.05, 0.5);
-    const detail = n.fbm(x * 4 + 9, y * 4 - 4, z * 4 + 2, 4, 2, 0.5) * 0.22;
-    const ridge = n.ridged(x * 2.3 - 7, y * 2.3 + 5, z * 2.3 + 11, 4);
-    const mask = smoothstep(0.02, 0.5, cont);
-    const isl = Math.max(0, n.fbm(x * 6 + 20, y * 6, z * 6 - 20, 3) - 0.18) * 0.9;
-    return cont + detail + ridge * mask * 0.62 + isl;
-  }
-  /** Elevation in km relative to sea level (negative = ocean depth). */
-  elevKm(x: number, y: number, z: number): number {
-    const e = this.raw(x, y, z) - this.seaLevel;
-    return e >= 0 ? e * 6.2 : e * 7.5;
-  }
-}
+export { TerrainSampler } from './terrain';
+import { TerrainSampler } from './terrain';
 
 const LAT_T = [[0, 27], [15, 25], [30, 20], [45, 10], [60, 1], [75, -12], [90, -23]];
 function latTemp(a: number): number {
@@ -64,12 +44,19 @@ export class Planet {
   windU = new Float32Array(N); // east-west wind component by latitude (-1..1)
   drain = new Int32Array(N).fill(-1);
   flow = new Float32Array(N);
+  /** land cells ordered from the sea upstream (iterate backwards to route water downhill) */
+  flowOrder = new Int32Array(0);
   river = new Uint8Array(N);
   freshDist: Uint8Array = new Uint8Array(N); // cells to nearest river/lake
   coastDist: Uint8Array = new Uint8Array(N); // cells to nearest ocean
   fertility = new Float32Array(N);
   biome = new Uint8Array(N);
   volcanic = new Uint8Array(N);
+  /** water surface of lakes (km), -1e9 where there is no lake */
+  lakeLevel = new Float32Array(N).fill(-1e9);
+  /** closeness to a plate boundary (0 far .. 1 on it) and its convergence (+ collision, - spreading) */
+  plateNear = new Float32Array(N);
+  plateConv = new Float32Array(N);
   cave = new Uint8Array(N);
   res: ResourceMaps = {
     stone: new Uint8Array(N), clay: new Uint8Array(N), coal: new Uint8Array(N),
@@ -79,13 +66,61 @@ export class Planet {
   baseVeg = new Float32Array(N);
   landCells = 0;
 
-  constructor(seed: number) {
+  constructor(seed: number, data?: { seaLevel: number; landCells: number; arrays: Record<string, ArrayBufferView> }) {
     this.seed = seed;
     this.terrain = new TerrainSampler(seed);
+    if (data) {
+      // rebuilt from arrays generated elsewhere (the simulation worker): identical, without regenerating
+      this.terrain.seaLevel = data.seaLevel;
+      this.landCells = data.landCells;
+      const self = this as unknown as Record<string, unknown>;
+      for (const [k, v] of Object.entries(data.arrays)) {
+        if (k.startsWith('res.')) (this.res as unknown as Record<string, unknown>)[k.slice(4)] = v;
+        else self[k] = v;
+      }
+      return;
+    }
     this.generateTerrain();
     this.generateClimate();
     this.generateHydrology();
     this.generateBiomesAndResources();
+  }
+
+  /** Everything needed to rebuild this planet with `new Planet(seed, data)`. */
+  toData(): { seaLevel: number; landCells: number; arrays: Record<string, ArrayBufferView> } {
+    const arrays: Record<string, ArrayBufferView> = {};
+    const keys = ['elev', 'ocean', 'lake', 'tempMean', 'tempAmp', 'rain', 'humidity', 'windU', 'drain', 'flow', 'flowOrder', 'river', 'freshDist', 'coastDist',
+      'fertility', 'biome', 'volcanic', 'lakeLevel', 'plateNear', 'plateConv', 'cave', 'baseVeg'] as const;
+    for (const k of keys) arrays[k] = (this[k] as ArrayBufferView);
+    for (const [k, v] of Object.entries(this.res)) arrays['res.' + k] = v as ArrayBufferView;
+    return { seaLevel: this.terrain.seaLevel, landCells: this.landCells, arrays };
+  }
+
+  /** Exact base elevation (km) at a continuous map position — the same function the renderer draws. */
+  elevAt(x: number, y: number): number {
+    const lon = lonOfX(((x % W) + W) % W);
+    const lat = latOfY(Math.max(0.001, Math.min(H - 0.001, y)));
+    const c = Math.cos(lat);
+    return this.terrain.elevKm(c * Math.cos(lon), Math.sin(lat), c * Math.sin(lon));
+  }
+  /** Dry land (not sea, not under a lake surface) at a continuous position. */
+  isLand(x: number, y: number, minKm = 0.002): boolean {
+    const e = this.elevAt(x, y);
+    if (e <= minKm) return false;
+    const i = idx(((Math.floor(x) % W) + W) % W, Math.max(0, Math.min(H - 1, Math.floor(y))));
+    return !(this.lake[i] && e < this.lakeLevel[i]);
+  }
+  /** Find a dry point near (x, y) within `radius` cells, or null. Deterministic in its inputs. */
+  landNear(x: number, y: number, radius = 0.45): { x: number; y: number } | null {
+    if (this.isLand(x, y)) return { x, y };
+    for (let r = 1; r <= 6; r++) {
+      for (let k = 0; k < 8; k++) {
+        const a = (k / 8) * Math.PI * 2 + r;
+        const px = x + Math.cos(a) * radius * (r / 6), py = y + Math.sin(a) * radius * (r / 6);
+        if (py > 0.01 && py < H - 0.01 && this.isLand(px, py)) return { x: ((px % W) + W) % W, y: py };
+      }
+    }
+    return null;
   }
 
   tempAt(i: number, day: number): number {
@@ -102,14 +137,18 @@ export class Planet {
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         dirFromLonLat(cellLon(x), cellLat(y), d);
-        raws[idx(x, y)] = t.raw(d[0], d[1], d[2]);
+        const ii = idx(x, y);
+        raws[ii] = t.raw(d[0], d[1], d[2]);
+        const tc = t.tectonics(d[0], d[1], d[2]);
+        this.plateNear[ii] = Math.exp(-Math.pow(tc.b / 0.06, 2));
+        this.plateConv[ii] = tc.conv;
       }
     }
     const sorted = Float32Array.from(raws).sort();
     t.seaLevel = sorted[Math.floor(N * 0.64)]; // ~36% land
     for (let i = 0; i < N; i++) {
       const e = raws[i] - t.seaLevel;
-      this.elev[i] = e >= 0 ? e * 6.2 : e * 7.5;
+      this.elev[i] = e >= 0 ? e * 6.4 : e * 7.5;
       this.ocean[i] = this.elev[i] < 0 ? 1 : 0;
       if (!this.ocean[i]) this.landCells++;
     }
@@ -262,12 +301,13 @@ export class Planet {
       else if (d >= 0) acc[d] += 0; // reaches the sea
     }
     this.flow.set(acc);
+    this.flowOrder = Int32Array.from(order);
     const land = Array.from({ length: N }, (_, i) => i).filter((i) => !this.ocean[i]);
     const sortedAcc = land.map((i) => acc[i]).sort((a, b) => a - b);
     const thr = sortedAcc[Math.floor(sortedAcc.length * 0.93)] || 1;
     for (const i of land) {
       if (acc[i] >= thr && this.tempMean[i] > -8) this.river[i] = 1;
-      if (filled[i] - this.elev[i] > 0.04 && acc[i] > thr * 0.25) this.lake[i] = 1;
+      if (filled[i] - this.elev[i] > 0.04 && acc[i] > thr * 0.25) { this.lake[i] = 1; this.lakeLevel[i] = filled[i]; }
     }
     // distances
     const bfs = (src: (i: number) => boolean, passOcean: boolean): Uint8Array => {
@@ -303,11 +343,14 @@ export class Planet {
       for (let x = 0; x < W; x++) {
         const i = idx(x, y);
         dirFromLonLat(cellLon(x), cellLat(y), d);
-        volc[i] = nz.ridged(d[0] * 3.1, d[1] * 3.1, d[2] * 3.1, 2) + 0.2 * nz.noise(d[0] * 9, d[1] * 9, d[2] * 9);
+        // volcanoes stand on arcs behind colliding plate boundaries and over hotspots
+        let hot = 0;
+        for (const h of this.terrain.hotspots) { const dd = 1 - (h.c[0] * d[0] + h.c[1] * d[1] + h.c[2] * d[2]); hot = Math.max(hot, Math.exp(-dd / (h.r * h.r * 0.6))); }
+        volc[i] = Math.max(0, this.plateConv[i]) * this.plateNear[i] * 1.2 + hot * 1.5 + 0.15 * nz.noise(d[0] * 9, d[1] * 9, d[2] * 9);
         if (!this.ocean[i]) landIdx.push(i);
       }
     const vs = landIdx.map((i) => volc[i]).sort((a, b) => a - b);
-    const vthr = vs[Math.floor(vs.length * 0.986)];
+    const vthr = vs[Math.floor(vs.length * 0.992)];
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
         const i = idx(x, y);

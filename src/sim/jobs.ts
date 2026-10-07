@@ -8,7 +8,8 @@ import { Pop } from './ecology';
 import { NR, W, KM_PER_CELL_Y, kmPerCellX, wrapDx, regionOfCell, idx, wrapX } from './grid';
 import { clamp, mix32 } from './rng';
 import { seasonOf } from './time';
-import { WALK_KMH, kmTo, walk } from './behavior';
+import { WALK_KMH as WALK, kmTo, walk } from './behavior';
+import { travelMult, workMult, yieldMult } from './techfx';
 
 /** The physical work loop. A person walks to a real node of a real resource, works there for a number of hours that
  *  depends on tools and skill, carries a load home and deposits it at the stockpile. Fields, buildings, kilns and
@@ -259,8 +260,9 @@ export function fieldsWanted(w: World, s: Settlement): number {
 export function fieldYield(w: World, s: Settlement, b: Building, skill: number): number {
   const cell = idx(wrapX(Math.floor(b.x)), Math.floor(b.y));
   const reg = regionOfCell(cell % W, Math.floor(cell / W));
-  const rain = clamp(Math.pow(w.env.anomaly[reg], 1.1), 0.1, 1.25);
-  let y = 480 * (0.25 + w.env.fert[cell]) * rain * (0.7 + 0.7 * skill) * (1 - 0.6 * clamp(b.weeds));
+  // with live weather, drought and frost have already marked the crop as it grew; otherwise use the regional anomaly
+  const rain = w.weather.seasonsObserved > 2 ? clamp(0.9 + 0.15 * w.env.anomaly[reg], 0.9, 1.15) : clamp(Math.pow(w.env.anomaly[reg], 1.1), 0.1, 1.25);
+  let y = 480 * (0.25 + w.env.fert[cell]) * rain * (0.7 + 0.7 * skill) * (1 - 0.6 * clamp(b.weeds)) * (1 - clamp(b.crop)) * yieldMult(s);
   if (s.tech.has('tools')) y *= 1.15;
   if (s.toolTier >= 2) y *= 1.15;
   if (s.tech.has('mathematics')) y *= 1.12;
@@ -277,6 +279,9 @@ export function fieldYield(w: World, s: Settlement, b: Building, skill: number):
 export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine: boolean): boolean {
   const rng = w.rng;
   let hours = dtDays * 24 * (fine ? 1 : 0.5);
+  // vehicles shorten trips; machines multiply what an hour of work produces
+  const WALK_KMH = WALK * travelMult(s);
+  const machine = workMult(s);
   const tier = s.toolTier;
   let guard = 0;
   let didSomething = false;
@@ -306,8 +311,10 @@ export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine:
           const tgt = nodePos(w, p)!;
           if (kmTo(p, tgt.x, tgt.y) > 0.12) { p.phase = 1; break; }
           const skillIdx = kind === 'tree' ? SK.woodcutting : kind === 'bush' || kind === 'fish' ? SK.foraging : SK.mining;
-          let rate = RATE[key][Math.min(2, tier)] * skillMult(p, skillIdx);
+          let rate = RATE[key][Math.min(2, tier)] * skillMult(p, skillIdx) * machine;
           if (kind === 'tree') rate *= 1 - 0.45 * w.flora.at(regionOfCell(p.tcell % W, Math.floor(p.tcell / W))).hardness * (tier === 0 ? 1.5 : 1);
+          // the catch depends on the fish actually in the water, and boats reach the richer grounds offshore
+          if (kind === 'fish') rate *= w.marine.fishery(tgt.x, tgt.y) * (1 + Math.min(1, s.ships * 0.08));
           if (rate <= 0.01) { s.scarce['tools'] = w.day; p.phase = 0; p.task = ''; break; }
           const cargoKind = kind === 'bush' || kind === 'fish' ? 'food' : res!;
           const cap = CAP[cargoKind];
@@ -323,6 +330,7 @@ export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine:
             p.cargoAmt += taken;
             p.timer = 0;
             p.phase = 3;
+            if (kind === 'fish') w.marine.take(tgt.x, tgt.y, taken);
             if (kind === 'tree') p.skills[SK.woodcutting] = Math.min(1, p.skills[SK.woodcutting] + 0.004);
             else if (kind === 'bush' || kind === 'fish') p.skills[SK.foraging] = Math.min(1, p.skills[SK.foraging] + 0.002);
             else p.skills[SK.mining] = Math.min(1, p.skills[SK.mining] + 0.004);
@@ -342,12 +350,13 @@ export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine:
             // coarse steps: repeat the same trip for as long as the time lasts
             if (!fine && hours > 1) {
               const trip = need * 2 + unit / Math.max(0.1, RATE[key][Math.min(2, tier)] * 0.9);
-              const reps = Math.min(Math.floor(hours / Math.max(trip, 0.5)), 40);
+              const reps = Math.min(Math.floor(hours / Math.max(trip, 0.5)), 240);
               for (let i = 0; i < reps; i++) {
                 const tw = kind === 'tree' ? w.flora.at(regionOfCell(p.tcell % W, Math.floor(p.tcell / W))).wood : 1;
                 const got = w.res.take(p.tcell, p.tslot, Math.min(unit, CAP[kind === 'bush' || kind === 'fish' ? 'food' : res!]) / tw, w.day) * tw;
                 if (got <= 0.05) break;
                 if (kind === 'bush' || kind === 'fish') { s.food += got; s.produced += got; } else s.res[res!] += got;
+                if (kind === 'fish') { const nd = w.res.nodes(p.tcell)[p.tslot]; w.marine.take(nd.x, nd.y, got); }
                 hours -= trip;
               }
               hours = Math.max(0, hours);
@@ -412,13 +421,13 @@ export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine:
         const act = p.tslot;
         const total = act === 3 ? FIELD_HOURS.harvest : act === 2 ? FIELD_HOURS.weed : FIELD_HOURS.plant;
         if ((act === 3 && b.fstate !== 2) || (act === 1 && b.fstate !== 0) || (act === 2 && b.fstate !== 1)) { p.phase = 0; p.task = ''; break; }
-        const mult = skillMult(p, SK.farming) * (tier >= 1 ? 1.2 : 1);
+        const mult = skillMult(p, SK.farming) * (tier >= 1 ? 1.2 : 1) * machine;
         const need = (total - p.timer * mult) / mult;
         if (need <= hours) {
           hours -= Math.max(0, need);
           p.timer = 0;
           p.skills[SK.farming] = Math.min(1, p.skills[SK.farming] + 0.006);
-          if (act === 1) { b.fstate = 1; b.planted = w.day; b.weeds = 0.05; s.food = Math.max(0, s.food - 4); }
+          if (act === 1) { b.fstate = 1; b.planted = w.day; b.weeds = 0.05; b.crop = 0; s.food = Math.max(0, s.food - 4); }
           else if (act === 2) b.weeds = 0.05;
           else {
             const y = fieldYield(w, s, b, p.skills[SK.farming]);
@@ -443,7 +452,7 @@ export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine:
           else { walk(w, p, b.x, b.y, hours * WALK_KMH, false); hours = 0; }
           break;
         }
-        const q = (0.7 + 0.8 * Math.min(1, p.skills[SK.building])) * (tier >= 1 ? 1.15 : 1);
+        const q = (0.7 + 0.8 * Math.min(1, p.skills[SK.building])) * (tier >= 1 ? 1.15 : 1) * machine;
         const left = (1 - b.progress) * BDEFS[b.kind].labor / q;
         const use = Math.min(hours, left);
         const finished = w.buildings.work(b, use, q);
@@ -485,8 +494,10 @@ export function runJob(w: World, p: Person, s: Settlement, dtDays: number, fine:
           if (units > 0.01) { s.res.clay -= units * 2; s.res.wood -= Math.min(s.res.wood, units * 0.5); s.goods += units; made = units; }
         } else {
           const rateMul = b ? 1 : 0.4;
-          const units = Math.min(hours / 2 * sk * rateMul, s.res.wood, s.res.stone / 0.5 + 99);
-          if (units > 0.01) { s.res.wood -= units; s.res.stone -= Math.min(s.res.stone, units * 0.5); s.goods += units; made = units; }
+          // crafts use only what is not set aside for a great work
+          const woodFree = Math.max(0, s.res.wood - (s.reserve?.wood ?? 0)), stoneFree = Math.max(0, s.res.stone - (s.reserve?.stone ?? 0));
+          const units = Math.min(hours / 2 * sk * rateMul, woodFree, stoneFree / 0.5 + 99);
+          if (units > 0.01) { s.res.wood -= units; s.res.stone -= Math.min(stoneFree, units * 0.5); s.goods += units; made = units; }
         }
         p.skills[SK.crafting] = Math.min(1, p.skills[SK.crafting] + hours * 0.0004);
         if (made <= 0.01) { s.scarce['craft'] = w.day; p.task = ''; p.phase = 0; hours = 0; } else hours = 0;

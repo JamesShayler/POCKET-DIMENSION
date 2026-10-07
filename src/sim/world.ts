@@ -17,11 +17,16 @@ import { Flora } from './flora';
 import { Buildings, emptyStock, BDEFS, Building } from './buildings';
 import { Diplomacy } from './diplomacy';
 import { Sky } from './sky';
+import { Weather } from './weather';
+import { Space } from './space';
+import { Marine } from './marine';
 import { tradeStep as tradeStepImpl } from './economy';
 import type { NodeKind } from './resources';
 import { settlementSeason, civSeason, outcastSeason, arriveBand, bandStuck } from './society';
 
 export const WORLD_VERSION = 1;
+/** Radius (km) around the observer's focus simulated in full detail. */
+export const FOCUS_KM = 250;
 
 export function seedFromText(text: string): number {
   return hashStr(text.trim().toLowerCase() || 'pocket');
@@ -38,6 +43,9 @@ export class World {
   buildings: Buildings;
   diplomacy = new Diplomacy();
   sky: Sky;
+  weather: Weather;
+  space: Space;
+  marine: Marine;
   /** how many times two settlements have traded, for the emergence of contact languages */
   tradePairs = new Map<string, number>();
   bus = new EventBus();
@@ -70,8 +78,13 @@ export class World {
   ration = new Map<number, number>();
   /** Simulation counters surfaced on the developer dashboard. */
   stats = { births: 0, deaths: 0, starved: 0, ticks: 0, causes: {} as Record<string, number> };
-  /** Optional hint: where the observer is looking (reserved for aggregation LOD). */
+  /**
+   * Where the observer is looking. Level of detail: people within FOCUS_KM of it are stepped every tick; everyone else is
+   * stepped in turn, every k-th tick with k times the time step (each still lives a whole individual life — work trips,
+   * births, deaths — just in coarser steps). Small worlds are always simulated in full detail.
+   */
   focus: { x: number; y: number } | null = null;
+  lodStats = { detailed: 0, coarse: 0, k: 1 };
 
   constructor(seedText: string) {
     this.seedText = seedText;
@@ -84,6 +97,9 @@ export class World {
     this.res = new Resources(this);
     this.buildings = new Buildings(this);
     this.sky = new Sky(this);
+    this.weather = new Weather(this);
+    this.space = new Space(this);
+    this.marine = new Marine(this);
     this.computeLandComponents();
   }
 
@@ -96,6 +112,7 @@ export class World {
     this.env.updateSeason(this);
     this.flora.seed();
     this.eco.seedLife();
+    this.marine.seed();
   }
 
   private computeLandComponents() {
@@ -221,6 +238,7 @@ export class World {
       abandoned: -1, tech: new Set(o.tech), food: 20, goods: 0, housing: 0, res: emptyStock(), need: {}, toolTier: 0, wealth: 0, range: 3, scarce: {}, nomadic: o.nomadic, permanent: false, stage: 'camp', pop: 0, peak: 0,
       knownKm: 90, stress: 0, stressSeasons: 0, surplus: 0, produced: 0, consumed: 0, drift: 0, langDrift: 0, disease: 0, diseaseUntil: 0,
       leader: 0, defense: 0, cohesion: 0.5, threat: 0, lastRaid: -99999, occupations: {}, originNote: o.note, yearsSettled: 0,
+      ships: 0, lord: 0, loyalty: 1,
     };
     this.settlements.push(s);
     if (!s.civ) this.createCiv(s, o.note);
@@ -285,8 +303,9 @@ export class World {
     const rng = this.rng;
     const best = this.findAwakenSite(region);
     if (best < 0) return false;
-    const sx = (best % W) + 0.5;
-    const sy = Math.floor(best / W) + 0.5;
+    const spot = this.planet.landNear((best % W) + 0.5, Math.floor(best / W) + 0.5) ?? { x: (best % W) + 0.5, y: Math.floor(best / W) + 0.5 };
+    const sx = spot.x;
+    const sy = spot.y;
     const lang = this.langs.create(rng, this.day);
     lang.vocabulary = 150;
     const cul = this.cultures.create(rng, this.day, lang.id, lang.phonology, undefined, `The first words and customs of a lineage descended from ${sp.name}.`);
@@ -300,7 +319,7 @@ export class World {
     const group: Person[] = [];
     for (let k = 0; k < n; k++) {
       const age = rng.range(14, 36) * DAYS_PER_YEAR;
-      const p = this.newPerson({ x: sx + rng.range(-0.4, 0.4), y: sy + rng.range(-0.4, 0.4), home: s.id, culture: cul.id, species: sp.id, ageDays: age, intelMean: clamp(traits.intel * 0.75), sex: k % 2 === 0 ? 1 : 0 });
+      const p = this.newPerson({ x: sx + rng.range(-0.004, 0.004), y: sy + rng.range(-0.004, 0.004), home: s.id, culture: cul.id, species: sp.id, ageDays: age, intelMean: clamp(traits.intel * 0.75), sex: k % 2 === 0 ? 1 : 0 });
       p.generation = 0;
       p.skills[0] = 0.3;
       p.occupation = 'forager';
@@ -358,6 +377,7 @@ export class World {
     const k = a.id < b.id ? `${a.id}:${b.id}` : `${b.id}:${a.id}`;
     const n = (this.tradePairs.get(k) ?? 0) + 1;
     this.tradePairs.set(k, n);
+    if (n % 5 === 2) this.space.connect(a, b);
     if (n === 1) this.history.record('TRADE', this.day, `${a.name} and ${b.name} traded for the first time.`, 1, { settlement: a.id, civ: a.civ, x: a.x, y: a.y, cause: 'A caravan carried surplus to a neighbour that lacked it.' });
     const la = this.cultures.get(a.culture)?.language, lb = this.cultures.get(b.culture)?.language;
     if (n === 14 && la && lb && la !== lb && this.langs.relatedness(la, lb) < 0.7) {
@@ -365,6 +385,10 @@ export class World {
       const pid = pl.id;
       pl.pidgin = true;
       pl.merged = [la, lb];
+      // contact languages shed endings: plain word order, particles, no cases or articles
+      pl.morphology = 'isolating';
+      pl.wordOrder = 'SVO';
+      pl.grammar = { ...pl.grammar, cases: { acc: '', gen: '', loc: '' }, plural: { how: 'reduplication', form: '' }, tense: { how: 'particle', past: pl.grammar.tense.past || 'bin', future: pl.grammar.tense.future || 'go' }, article: '' };
       pl.name = `${this.langs.get(la)!.name}-${this.langs.get(lb)!.name} trade tongue`;
       for (const p of this.alive) if (p.occupation === 'trader' && (p.home === a.id || p.home === b.id)) p.fluency.set(pid, 0.85);
       this.history.record('LANGUAGE_SPLIT', this.day, `A trade pidgin grew between ${this.langs.get(la)!.name} and ${this.langs.get(lb)!.name} speakers.`, 2, {
@@ -376,6 +400,8 @@ export class World {
     return tradeStepImpl(this, p, s, hours, fine);
   }
   firstFinds = new Set<string>();
+  /** art left on cave walls (the first per people is chronicled) */
+  cavePaintings: { cell: number; settlement: number; culture: number; day: number; artist: number; subject: string }[] = [];
   /** runtime-only cache of each settlement's current favourite node per resource kind */
   findCache = new Map<number, { cell: number; slot: number; day: number }>();
 
@@ -393,17 +419,21 @@ export class World {
     this.day += dt;
     this.stats.ticks++;
     this.seasonAcc += dt;
+    this.weather.step(dt);
     while (this.seasonAcc >= DAYS_PER_SEASON) {
       this.seasonAcc -= DAYS_PER_SEASON;
       this.env.updateSeason(this);
       this.eco.step();
       this.flora.step();
+      this.marine.season();
       this.sky.step();
       if (this.awakened) {
         this.diplomacy.season(this);
         settlementSeason(this);
         outcastSeason(this);
         civSeason(this);
+        this.space.season();
+        this.space.prune();
       }
     }
     if (!this.awakened || this.alive.length === 0) return;
@@ -422,9 +452,34 @@ export class World {
     }
     this.farmLoad.clear();
     const snapshot = this.alive.slice();
-    for (const p of snapshot) if (p.alive) personStep(this, p, dt);
+    const k = this.lodFactor(dt, snapshot.length);
+    if (k <= 1 || !this.focus) {
+      for (const p of snapshot) if (p.alive) personStep(this, p, dt);
+      this.lodStats.detailed = snapshot.length; this.lodStats.coarse = 0; this.lodStats.k = 1;
+    } else {
+      const f = this.focus;
+      const t = this.stats.ticks;
+      let nd = 0, nc = 0;
+      for (const p of snapshot) {
+        if (!p.alive) continue;
+        // band members move together with their leader's phase so a band never splits across ticks
+        const anchor = p.band ? (this.bands.get(p.band)?.leader ?? p.id) : p.home || p.id;
+        const home = p.home ? this.settlements[p.home - 1] : undefined;
+        const near = distKm(p.x, p.y, f.x, f.y) < FOCUS_KM || (home !== undefined && distKm(home.x, home.y, f.x, f.y) < FOCUS_KM);
+        if (near) { personStep(this, p, dt); nd++; }
+        else if ((t + anchor) % k === 0) { personStep(this, p, dt * k); nc++; }
+      }
+      this.lodStats.detailed = nd; this.lodStats.coarse = nc; this.lodStats.k = k;
+    }
     if (this.alive.length && this.stats.ticks % 8 === 0) this.alive = this.alive.filter((p) => p.alive);
     else this.alive = this.alive.filter((p) => p.alive);
+  }
+
+  /** How many ticks a distant person waits between (proportionally longer) steps. */
+  private lodFactor(dt: number, pop: number): number {
+    if (pop < 1200) return 1;
+    const target = Math.min(30, Math.max(0.25, dt * Math.min(16, pop / 600)));
+    return Math.max(1, Math.round(target / dt));
   }
 
   /** Run only the pre-human world forward (ecology + environment), in season-sized steps. */
@@ -434,6 +489,7 @@ export class World {
       this.env.updateSeason(this);
       this.eco.step();
       this.flora.step();
+      this.marine.season();
     }
   }
 

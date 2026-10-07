@@ -1,4 +1,5 @@
 import type { World } from './world';
+import { military } from './techfx';
 import type { Band } from './behavior';
 import type { Person } from './people';
 import { P } from './people';
@@ -93,7 +94,7 @@ export class Diplomacy {
 
   private strength(w: World, list: Settlement[]): number {
     let s = 0;
-    for (const x of list) s += x.pop * 0.25 + (x.occupations['warrior'] ?? 0) * 1.2 + x.defense * 20 + (x.toolTier >= 2 ? x.pop * 0.1 : 0);
+    for (const x of list) s += (x.pop * 0.25 + (x.occupations['warrior'] ?? 0) * 1.2) * military(x) + x.defense * 20;
     return s;
   }
 
@@ -153,6 +154,26 @@ export class Diplomacy {
   }
 
   private mobilize(w: World, r: Relation, from: Settlement, to: Settlement) {
+    // across water the army must be carried by ships, and an enemy fleet may meet them first
+    const ci = (s: Settlement) => idx(wrapX(Math.floor(s.x)), Math.floor(s.y));
+    if (w.landComp[ci(from)] !== w.landComp[ci(to)]) {
+      if (from.ships < 2) return;
+      if (to.ships >= 1) {
+        const atk = from.ships * military(from) * (0.7 + w.random() * 0.6);
+        const def = to.ships * military(to) * (0.8 + w.random() * 0.6);
+        const win = atk > def;
+        const lostA = Math.min(from.ships, Math.ceil(from.ships * (win ? 0.2 : 0.6) * w.random() + (win ? 0 : 1)));
+        const lostD = Math.min(to.ships, Math.ceil(to.ships * (win ? 0.6 : 0.2) * w.random() + (win ? 1 : 0)));
+        from.ships -= lostA;
+        to.ships -= lostD;
+        const fa = w.civs[from.civ - 1], fd = w.civs[to.civ - 1];
+        w.history.record('BATTLE', w.day, `The fleets of the ${fa.name} and the ${fd.name} fought off ${to.name}: ${win ? `the ${fa.name}` : `the ${fd.name}`} won (${Math.round(lostA)} and ${Math.round(lostD)} ships lost).`, 2, {
+          settlement: to.id, civ: from.civ, x: (from.x + to.x) / 2, y: (from.y + to.y) / 2, cause: `An invasion across the sea from ${from.name} had to get past the defenders' ships.`,
+        });
+        r.battles++;
+        if (!win) return;
+      }
+    }
     const adults = (w.residents.get(from.id) ?? []).filter((p) => p.alive && !p.band && p.ageYears(w.day) >= 16 && p.ageYears(w.day) < 50 && p.id !== from.leader && p.sex === 0);
     if (adults.length < 6) return;
     adults.sort((a, b) => (b.occupation === 'warrior' ? 1 : 0) + b.personality[P.aggression] * 0.5 - ((a.occupation === 'warrior' ? 1 : 0) + a.personality[P.aggression] * 0.5));
@@ -184,11 +205,37 @@ export class Diplomacy {
     const defenders = (w.residents.get(target.id) ?? []).filter((p) => p.alive && p.ageYears(w.day) >= 15 && !p.band);
     let atk = 0;
     for (const m of members) atk += m.personality[P.aggression] * 0.5 + m.personality[P.bravery] * 0.4 + 0.4 + (m.occupation === 'warrior' ? 0.5 : 0);
-    atk *= from && from.toolTier >= 2 ? 1.35 : 1;
+    atk *= military(from);
     let def = 0;
     for (const d of defenders) def += (d.occupation === 'warrior' ? 1.2 : 0.4) * (0.6 + d.personality[P.bravery] * 0.5);
     const towers = w.buildings.count(target.id, 'tower');
-    def *= 1 + target.defense * 4 + towers * 0.45 + (target.toolTier >= 2 ? 0.35 : 0);
+    def *= (1 + target.defense * 4 + towers * 0.45) * military(target);
+    // walls: an army that cannot storm them settles in for a siege, starving the town and battering a breach
+    const walls = wallFactor(w, target, from);
+    if (walls > 1.3) {
+      if (b.siege === undefined) {
+        b.siege = w.day;
+        b.lastAssault = w.day;
+        w.history.record('BATTLE', w.day, `${leader.name}'s army laid siege to ${target.name}.`, 2, {
+          persons: [leader.id], settlement: target.id, civ: b.civ, x: target.x, y: target.y, cause: `${target.name}'s ${w.buildings.count(target.id, 'wall') ? 'stone walls' : 'palisade'} were too strong to storm at once.`,
+        });
+        return;
+      }
+      const days = w.day - b.siege;
+      target.food = Math.max(0, target.food - target.pop * 0.25 * w.dt);
+      for (const m of members) m.food += w.env.takeForage(idx(wrapX(Math.floor(m.x)), Math.floor(m.y)), 1.2 * w.dt, w.day) * 0.5;
+      if (target.food <= 0 && w.random() < 0.02 * w.dt) {
+        def *= 0.15; // starving defenders open the gates
+      } else if (days > 240 || members.length < 5) {
+        w.history.record('BATTLE', w.day, `The siege of ${target.name} was lifted after ${Math.round(days)} days.`, 1, { settlement: target.id, civ: b.civ, x: target.x, y: target.y, cause: 'The besiegers ran out of men, food or patience.' });
+        b.returning = true;
+        if (from && from.abandoned < 0) { b.tx = from.x; b.ty = from.y; }
+        return;
+      } else if (w.day - (b.lastAssault ?? b.siege) < 15) return;
+      b.lastAssault = w.day;
+      const breach = Math.min(0.75, (days / 300) * (from?.tech.has('engineering') ? 2 : 1) * (from?.tech.has('gunpowder') ? 2.5 : 1));
+      def *= 1 + (walls - 1) * (1 - breach);
+    }
     const win = w.random() < atk / (atk + def + 0.01);
     const lossA = Math.round(members.length * (win ? 0.08 + w.random() * 0.12 : 0.3 + w.random() * 0.3));
     const lossD = Math.round(defenders.length * (win ? 0.15 + w.random() * 0.25 : 0.05 + w.random() * 0.08));
@@ -233,8 +280,20 @@ export class Diplomacy {
       persons: [leader.id], settlement: target.id, civ: b.civ, x: target.x, y: target.y,
       cause: `Part of the war between the ${fromCiv?.name} and the ${toCiv?.name}, begun over ${r.cause || 'old grievances'}.`,
     });
+    // a failed assault on a besieged town does not end the siege while the army holds together
+    if (b.siege !== undefined && !win && members.length >= 6 && target.civ !== b.civ) return;
     b.returning = true;
     if (from && from.abandoned < 0) { b.tx = from.x; b.ty = from.y; } else { b.tx = leader.x; b.ty = leader.y; }
   }
+}
+
+/** How much a town's walls multiply its defenders (cannon and siege engines blunt them). */
+export function wallFactor(w: World, s: Settlement, attacker?: Settlement): number {
+  const f = w.buildings.count(s.id, 'wall') ? 2.8 : w.buildings.count(s.id, 'palisade') ? 1.7 : 1;
+  if (f === 1) return 1;
+  let k = 1;
+  if (attacker?.tech.has('engineering')) k *= 0.75;
+  if (attacker?.tech.has('gunpowder')) k *= 0.45;
+  return 1 + (f - 1) * k;
 }
 void idx; void wrapX; void yearOf;

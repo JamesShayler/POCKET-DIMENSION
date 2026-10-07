@@ -1,496 +1,640 @@
 import * as THREE from 'three';
-import type { World } from '../sim/world';
-import { H, NR, R_KM, RF, RW, W, idx, kmPerCellX, lonOfX, latOfY } from '../sim/grid';
-import { mix32, Rng } from '../sim/rng';
-import { BDEFS, HOUSING } from '../sim/buildings';
-import { GROW_DAYS } from '../sim/jobs';
-import type { NodeKind } from '../sim/resources';
-import { PlanetView } from './planetView';
-import { CameraRig } from './camera';
+import type { SimClient } from '../client';
+import { BDEFS, RINGS, type BKind } from '../sim/buildings';
+import { H, R_KM, W, lonOfX, latOfY, idx, wrapX } from '../sim/grid';
+import { ACT, unpackPerson } from '../shared/protocol';
+import type { Terrain } from './terrain';
+import { hsl } from './fields';
+import * as M from './models';
 
-const Y = new THREE.Vector3(0, 1, 0);
-const Z = new THREE.Vector3(0, 0, 1);
+/**
+ * Everything standing on the ground, at true size: people, animals, buildings, walls, fields, forests, rocks, ore,
+ * berry bushes, ships and aircraft. Positions are kept relative to a local anchor near the camera (double precision on
+ * the CPU, small float32 offsets on the GPU), and everything sits on the drawn terrain surface.
+ */
+const BKINDS = Object.keys(BDEFS) as BKind[];
+const KM = 0.001; // metres → kilometres
+
+export type PickKind = 'person' | 'settlement' | 'animal' | 'node' | 'building';
+export interface Pickable { kind: PickKind; id: number; extra?: number; p: [number, number, number] }
+
 const tmpM = new THREE.Matrix4();
-const tmpQ = new THREE.Quaternion();
-const tmpQ2 = new THREE.Quaternion();
-const tmpP = new THREE.Vector3();
-const tmpS = new THREE.Vector3();
-const tmpN = new THREE.Vector3();
 const tmpC = new THREE.Color();
+const vUp = new THREE.Vector3(), vN = new THREE.Vector3(), vE = new THREE.Vector3(), vF = new THREE.Vector3(), vR = new THREE.Vector3();
+const Y = new THREE.Vector3(0, 1, 0);
 
-export type Pick = { kind: 'person' | 'settlement' | 'animal' | 'node' | 'building'; id: number; sx: number; sy: number; extra?: number };
+function inst(g: THREE.BufferGeometry, n: number, mat?: THREE.Material): THREE.InstancedMesh {
+  const m = new THREE.InstancedMesh(g, mat ?? new THREE.MeshLambertMaterial({ vertexColors: true }), n);
+  m.frustumCulled = false;
+  m.count = 0;
+  m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  return m;
+}
 
-const hsl = (h: number, s: number, l: number) => tmpC.setHSL(h, s, l);
-
-const ORE_COLOR: Partial<Record<NodeKind, number>> = { copper: 0xc86f3a, iron: 0x7a4a3a, coal: 0x1c1c20, gold: 0xf0c53a };
-
-/** Instanced markers for the physical world. Everything is read from the simulation; nothing is written back. */
-export class EntityLayer {
+export class Entities {
   readonly group = new THREE.Group();
+  anchor: [number, number, number] = [0, 0, R_KM];
   private people: THREE.InstancedMesh;
   private cargo: THREE.InstancedMesh;
-  private animals: THREE.InstancedMesh;
-  private markers: THREE.InstancedMesh;
+  private skiffs: THREE.InstancedMesh;
+  private animals: THREE.InstancedMesh[];
+  private buildings = new Map<BKind, THREE.InstancedMesh>();
+  private palisade: THREE.InstancedMesh;
+  private stoneWall: THREE.InstancedMesh;
+  private towers: THREE.InstancedMesh;
+  private fields: THREE.Mesh;
   private trunks: THREE.InstancedMesh;
-  private crowns: THREE.InstancedMesh;
-  private bushes: THREE.InstancedMesh;
+  private crowns: THREE.InstancedMesh[];
   private rocks: THREE.InstancedMesh;
   private ores: THREE.InstancedMesh;
-  private walls: THREE.InstancedMesh;
-  private roofs: THREE.InstancedMesh;
-  private fields: THREE.InstancedMesh;
-  private ring: THREE.Mesh;
-  private pings: THREE.Mesh[] = [];
-  private pingState: { x: number; y: number; t0: number; color: number }[] = [];
-  private peopleIds: number[] = [];
-  private animalInfo: { sp: number; x: number; y: number; z: number }[] = [];
-  private nodeInfo: { kind: NodeKind; cell: number; slot: number; x: number; y: number; z: number }[] = [];
-  private bldInfo: { id: number; x: number; y: number; z: number }[] = [];
-  private staticKey = '';
-  private lastStatic = -1e9;
+  private sailships: THREE.InstancedMesh;
+  private steamships: THREE.InstancedMesh;
+  private planes: THREE.InstancedMesh;
+  private trails: THREE.LineSegments;
+  private sea: THREE.InstancedMesh;
+  /** what can be clicked, in planet-frame km */
+  pickables: Pickable[] = [];
+  private staticPicks: Pickable[] = [];
+  private stamp = '';
+  private lastStatic = 0;
+  private terrainStamp = 0;
   selected: { kind: string; id: number; extra?: number } | null = null;
-  static readonly MAX_PEOPLE = 9000;
-  static readonly MAX_ANIMALS = 6000;
+  personPos = new Map<number, [number, number, number]>();
 
-  constructor(private world: World, private pv: PlanetView) {
-    const mk = (g: THREE.BufferGeometry, mat: THREE.Material, n: number) => {
-      const m = new THREE.InstancedMesh(g, mat, n);
-      m.frustumCulled = false;
-      m.count = 0;
-      this.group.add(m);
-      return m;
-    };
-    const lam = () => new THREE.MeshLambertMaterial({ color: 0xffffff });
-    const capsule = new THREE.CapsuleGeometry(0.28, 0.9, 2, 5);
-    capsule.translate(0, 0.7, 0);
-    this.people = mk(capsule, lam(), EntityLayer.MAX_PEOPLE);
-    const cargoG = new THREE.BoxGeometry(0.6, 0.45, 0.6);
-    cargoG.translate(0, 1.95, 0);
-    this.cargo = mk(cargoG, lam(), EntityLayer.MAX_PEOPLE);
-    const cone = new THREE.ConeGeometry(0.5, 1.2, 5);
-    cone.translate(0, 0.6, 0);
-    this.animals = mk(cone, lam(), EntityLayer.MAX_ANIMALS);
-    const marker = new THREE.ConeGeometry(0.6, 2, 6);
-    marker.translate(0, 1, 0);
-    this.markers = mk(marker, new THREE.MeshBasicMaterial({ color: 0xffffff }), 2000);
-    const trunk = new THREE.CylinderGeometry(0.07, 0.1, 0.7, 5);
-    trunk.translate(0, 0.35, 0);
-    this.trunks = mk(trunk, new THREE.MeshLambertMaterial({ color: 0x5b4330 }), 14000);
-    const crown = new THREE.ConeGeometry(0.42, 1.3, 6);
-    crown.translate(0, 1.15, 0);
-    this.crowns = mk(crown, lam(), 14000);
-    const bush = new THREE.IcosahedronGeometry(0.5, 0);
-    bush.translate(0, 0.3, 0);
-    this.bushes = mk(bush, lam(), 3000);
-    const rock = new THREE.DodecahedronGeometry(0.5, 0);
-    rock.scale(1, 0.6, 1);
-    rock.translate(0, 0.25, 0);
-    this.rocks = mk(rock, lam(), 2500);
-    const ore = new THREE.OctahedronGeometry(0.5, 0);
-    ore.translate(0, 0.4, 0);
-    this.ores = mk(ore, new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0x111111 }), 1500);
-    const wall = new THREE.BoxGeometry(1, 1, 1);
-    wall.translate(0, 0.5, 0);
-    this.walls = mk(wall, lam(), 7000);
-    const roof = new THREE.ConeGeometry(0.78, 0.55, 4);
-    roof.rotateY(Math.PI / 4);
-    roof.translate(0, 1.27, 0);
-    this.roofs = mk(roof, lam(), 7000);
-    const field = new THREE.PlaneGeometry(1, 1);
-    field.rotateX(-Math.PI / 2);
-    this.fields = mk(field, lam(), 5000);
-    (this.fields.material as THREE.MeshLambertMaterial).side = THREE.DoubleSide;
-    this.ring = new THREE.Mesh(new THREE.RingGeometry(0.8, 1, 40), new THREE.MeshBasicMaterial({ color: 0xfff1b0, side: THREE.DoubleSide, transparent: true, opacity: 0.9, depthTest: false }));
-    this.ring.visible = false;
-    this.ring.renderOrder = 10;
-    this.group.add(this.ring);
-    for (let i = 0; i < 6; i++) {
-      const p = new THREE.Mesh(new THREE.RingGeometry(0.9, 1, 48), new THREE.MeshBasicMaterial({ color: 0xffd27a, side: THREE.DoubleSide, transparent: true, opacity: 0, depthTest: false }));
-      p.visible = false;
-      p.renderOrder = 9;
-      this.pings.push(p);
-      this.group.add(p);
-    }
-    world.bus.on('*', (e) => {
-      if (e.weight >= 2 && e.x !== undefined && e.y !== undefined) this.ping(e.x, e.y, ['DISASTER', 'BATTLE', 'REVOLT', 'WAR', 'INVASION'].includes(e.type) ? 0xff6b5a : e.type === 'TECHNOLOGY_DISCOVERY' ? 0x9be8ff : 0xffd27a);
-    });
+  constructor(private c: SimClient, private terrain: Terrain) {
+    this.people = inst(M.personModel(), 8000);
+    this.cargo = inst(M.cargoModel(), 8000);
+    this.skiffs = inst(M.boatModel(false), 2000);
+    this.animals = [0, 1, 2].map((d) => inst(M.animalModel(d), 3000));
+    for (const k of BKINDS) if (k !== 'field' && !RINGS.includes(k)) this.buildings.set(k, inst(M.buildingModel(k), 6000));
+    this.palisade = inst(M.wallSegment(false), 12000);
+    this.stoneWall = inst(M.wallSegment(true), 12000);
+    this.towers = inst(M.wallTower(), 400);
+    this.fields = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshLambertMaterial({ vertexColors: true, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+    this.fields.frustumCulled = false;
+    this.trunks = inst(M.treeTrunk(), 90000);
+    this.crowns = [M.conifer(), M.broadleaf(), M.palm(), M.shrub()].map((g) => inst(g, 90000));
+    this.rocks = inst(M.boulder(), 30000);
+    this.ores = inst(M.boulder(), 3000, new THREE.MeshLambertMaterial({ vertexColors: true, emissive: 0x222222 }));
+    this.sailships = inst(M.boatModel(true), 400);
+    this.steamships = inst(M.steamshipModel(), 400);
+    this.planes = inst(M.planeModel(), 300);
+    const tg = new THREE.BufferGeometry();
+    tg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(300 * 6), 3));
+    this.trails = new THREE.LineSegments(tg, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55, depthWrite: false }));
+    this.trails.frustumCulled = false;
+    this.sea = inst(M.whaleModel(), 600);
+    this.group.add(this.people, this.cargo, this.skiffs, ...this.animals, ...this.buildings.values(), this.palisade, this.stoneWall, this.towers, this.fields,
+      this.trunks, ...this.crowns, this.rocks, this.ores, this.sailships, this.steamships, this.planes, this.trails, this.sea);
   }
 
-  ping(x: number, y: number, color: number) {
-    this.pingState.push({ x, y, t0: performance.now(), color });
-    if (this.pingState.length > 6) this.pingState.shift();
+  // ---------------------------------------------------------------- placement helpers
+  /** Planet-frame position (km) on the drawn ground at map coordinates, lifted `lift` km. */
+  ground(x: number, y: number, lift = 0, out: [number, number, number] = [0, 0, 0]): [number, number, number] {
+    const lon = lonOfX(x), lat = latOfY(y);
+    const cl = Math.cos(lat);
+    const dx = cl * Math.cos(lon), dy = Math.sin(lat), dz = cl * Math.sin(lon);
+    let h = this.terrain.heightAt(dx, dy, dz);
+    if (h === null) h = Math.max(0, this.c.planet.elevAt(x, y));
+    const r = R_KM + h + lift;
+    out[0] = dx * r; out[1] = dy * r; out[2] = dz * r;
+    return out;
+  }
+  /** Instance matrix: at planet-frame `p`, standing up, facing `heading` (radians from north toward east), scaled. */
+  private place(p: [number, number, number], heading: number, sx: number, sy: number, sz: number, tilt = 0): THREE.Matrix4 {
+    const r = Math.hypot(p[0], p[1], p[2]);
+    vUp.set(p[0] / r, p[1] / r, p[2] / r);
+    vN.copy(Y).addScaledVector(vUp, -vUp.y);
+    if (vN.lengthSq() < 1e-10) vN.set(1, 0, 0);
+    vN.normalize();
+    vE.crossVectors(vUp, vN);
+    vF.copy(vN).multiplyScalar(Math.cos(heading)).addScaledVector(vE, Math.sin(heading));
+    vR.crossVectors(vUp, vF); // right-hand side (x axis)
+    // a proper rotation: x = y × z, so nothing is mirrored
+    if (tilt) {
+      // lying down: the body's "up" points along the ground, its front faces the sky... or the earth
+      tmpM.makeBasis(vR.clone().multiplyScalar(sx), vF.clone().multiplyScalar(sy), vUp.clone().negate().multiplyScalar(sz));
+    } else tmpM.makeBasis(vR.clone().multiplyScalar(sx), vUp.clone().multiplyScalar(sy), vF.clone().multiplyScalar(sz));
+    tmpM.setPosition(p[0] - this.anchor[0], p[1] - this.anchor[1], p[2] - this.anchor[2]);
+    return tmpM;
+  }
+  private kmTo(p: [number, number, number], q: [number, number, number]) {
+    return Math.hypot(p[0] - q[0], p[1] - q[1], p[2] - q[2]);
   }
 
-  private place(x: number, y: number, lift: number, out: THREE.Vector3, n: THREE.Vector3) {
-    CameraRig.dir(lonOfX(x), latOfY(y), n);
-    out.copy(n).multiplyScalar(this.pv.groundRadius(x, y) + lift + 0.002);
-  }
-
-  personPos(p: { x: number; y: number; px: number; py: number }, alpha: number, out: THREE.Vector3, n: THREE.Vector3) {
-    let dx = p.x - p.px;
-    if (dx > W / 2) dx -= W;
-    if (dx < -W / 2) dx += W;
-    this.place(p.px + dx * alpha, p.py + (p.y - p.py) * alpha, 0, out, n);
-  }
-
-  update(cam: CameraRig, camera: THREE.PerspectiveCamera, alpha: number, time: number, renderDay: number) {
-    const w = this.world;
-    const alt = cam.alt;
-    const camPos = camera.position;
-    // ---- settlement markers (visible from orbit) ----
-    let mi = 0;
-    const markScale = Math.max(0.35, alt * 0.0042);
-    if (alt > 18) {
-      for (const s of w.activeSettlements()) {
-        if (mi >= 2000) break;
-        this.place(s.x, s.y, 0.3, tmpP, tmpN);
-        if (tmpN.dot(camPos.clone().normalize()) < -0.1 && alt < R_KM * 1.2) continue;
-        const stage = { camp: 0.55, settlement: 0.75, village: 0.95, town: 1.2, city: 1.6 }[s.stage];
-        const cul = w.cultures.get(s.culture);
-        hsl(cul ? cul.color : 0.1, 0.75, 0.62);
-        tmpQ.setFromUnitVectors(Y, tmpN);
-        tmpS.setScalar(markScale * stage * (alt > 20000 ? alt / 20000 : 1));
-        tmpM.compose(tmpP, tmpQ, tmpS);
-        this.markers.setMatrixAt(mi, tmpM);
-        this.markers.setColorAt(mi, tmpC);
-        mi++;
-      }
-    }
-    this.markers.count = mi;
-    this.markers.instanceMatrix.needsUpdate = true;
-    if (this.markers.instanceColor) this.markers.instanceColor.needsUpdate = true;
-
-    this.staticLayer(cam, camera, renderDay);
-
-    // ---- people (with what they are carrying) ----
-    let pi = 0;
-    this.peopleIds.length = 0;
-    const personScale = Math.min(6, Math.max(0.0105, alt * 0.0075));
-    const maxDist = alt * 4 + 40;
-    let ci = 0;
-    if (alt < 900) {
-      for (const p of w.alive) {
-        if (pi >= EntityLayer.MAX_PEOPLE) break;
-        if (!p.alive) continue;
-        this.personPos(p, alpha, tmpP, tmpN);
-        if (tmpP.distanceToSquared(camPos) > maxDist * maxDist) continue;
-        const selected = this.selected && this.selected.kind === 'person' && this.selected.id === p.id;
-        const cul = w.cultures.get(p.culture);
-        const age = p.ageYears(w.day);
-        hsl(cul ? cul.color : 0.1, p.band ? 0.35 : 0.8, selected ? 0.9 : p.sex ? 0.64 : 0.52);
-        tmpQ.setFromUnitVectors(Y, tmpN);
-        const s = personScale * (age < 12 ? 0.55 : 1) * (selected ? 1.8 : 1);
-        tmpS.setScalar(s);
-        tmpM.compose(tmpP, tmpQ, tmpS);
-        this.people.setMatrixAt(pi, tmpM);
-        this.people.setColorAt(pi, tmpC);
-        this.peopleIds[pi] = p.id;
-        pi++;
-        if (p.cargoAmt > 0.5 && ci < EntityLayer.MAX_PEOPLE) {
-          const col = p.cargo === 'food' ? 0xd9b45a : p.cargo === 'wood' ? 0x8a5a2b : p.cargo === 'stone' ? 0x8b8b8b : p.cargo === 'clay' ? 0xb85a3a : p.cargo === 'gold' ? 0xf0c53a : p.cargo === 'metal' ? 0xb0b8c4 : 0x555566;
-          tmpC.setHex(col);
-          tmpS.setScalar(s * (0.7 + Math.min(1, p.cargoAmt / 24) * 0.8));
-          tmpM.compose(tmpP, tmpQ, tmpS);
-          this.cargo.setMatrixAt(ci, tmpM);
-          this.cargo.setColorAt(ci, tmpC);
-          ci++;
-        }
-      }
-    }
-    this.people.count = pi;
-    this.cargo.count = ci;
-    for (const m of [this.people, this.cargo]) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
-
-    // ---- wildlife: the very same animals the hunters chase ----
-    let ai = 0;
-    this.animalInfo.length = 0;
-    if (alt < 1400) {
-      const eco = w.eco;
-      const vis = alt * 5 + 80;
-      for (const pop of eco.pops.values()) {
-        if (ai >= EntityLayer.MAX_ANIMALS) break;
-        const cells = eco.regionCells[pop.r];
-        if (!cells.length) continue;
-        const rx = (pop.r % RW) * RF + RF / 2;
-        const ry = Math.floor(pop.r / RW) * RF + RF / 2;
-        this.place(rx, ry, 0, tmpP, tmpN);
-        if (tmpP.distanceToSquared(camPos) > (vis + 80) * (vis + 80)) continue;
-        const sp = eco.speciesById(pop.sp);
-        const k = eco.markerCount(pop);
-        for (let m = 0; m < k && ai < EntityLayer.MAX_ANIMALS; m++) {
-          const pos = eco.markerPos(pop, m, renderDay);
-          if (!pos) continue;
-          this.place(pos.x, pos.y, 0, tmpP, tmpN);
-          if (tmpP.distanceToSquared(camPos) > vis * vis) continue;
-          const ph = ((mix32(mix32(pop.sp, pop.r), m) >>> 3) % 628) / 100;
-          tmpQ.setFromUnitVectors(Y, tmpN);
-          tmpQ2.setFromAxisAngle(tmpN, ph + Math.sin(renderDay * 40 + ph) * 0.2);
-          tmpQ.premultiply(tmpQ2);
-          const size = (0.5 + 0.28 * Math.log(1 + pop.t.size * 2)) * personScale * (sp.diet === 'carn' ? 1.1 : 1);
-          tmpS.set(size, size, size);
-          tmpM.compose(tmpP, tmpQ, tmpS);
-          this.animals.setMatrixAt(ai, tmpM);
-          hsl(sp.hue, sp.diet === 'carn' ? 0.7 : 0.45, sp.diet === 'carn' ? 0.36 : sp.diet === 'omni' ? 0.45 : 0.55);
-          this.animals.setColorAt(ai, tmpC);
-          this.animalInfo[ai] = { sp: sp.id, x: tmpP.x, y: tmpP.y, z: tmpP.z };
-          ai++;
-        }
-      }
-    }
-    this.animals.count = ai;
-    this.animals.instanceMatrix.needsUpdate = true;
-    if (this.animals.instanceColor) this.animals.instanceColor.needsUpdate = true;
-
-    this.updateRing(cam, alpha, time);
-    this.updatePings(cam);
-  }
-
-  /** Trees, bushes, rocks, ore, buildings and fields near the camera. Rebuilt a few times a second, not every frame. */
-  private staticLayer(cam: CameraRig, camera: THREE.PerspectiveCamera, renderDay: number) {
-    const w = this.world;
-    const alt = cam.alt;
-    const clear = () => { for (const m of [this.trunks, this.crowns, this.bushes, this.rocks, this.ores, this.walls, this.roofs, this.fields]) m.count = 0; this.nodeInfo.length = 0; this.bldInfo.length = 0; };
-    if (alt > 90) { clear(); this.staticKey = ''; return; }
+  // ---------------------------------------------------------------- per frame
+  update(cam: [number, number, number], target: [number, number, number], origin: [number, number, number], day: number, alpha: number, time: number, camAlt: number, terrainVersion: number) {
+    // re-anchor when the view has moved far enough for float32 offsets to matter
+    if (this.kmTo(target, this.anchor) > 4) { this.anchor = [target[0], target[1], target[2]]; this.stamp = ''; }
+    this.group.position.set(this.anchor[0] - origin[0], this.anchor[1] - origin[1], this.anchor[2] - origin[2]);
+    const near = camAlt < 40;
+    this.group.visible = camAlt < 400;
+    if (!this.group.visible) { this.pickables = []; return; }
+    const c = this.c;
+    // static things: rebuilt when the simulation or the ground under them changes
+    const st = `${c.versions.buildings}:${c.versions.nodes}:${c.versions.env}:${this.terrain.treeVersion}:${near}`;
     const now = performance.now();
-    const key = `${Math.round(cam.lon * 400)}:${Math.round(cam.lat * 400)}:${Math.round(Math.log(alt) * 3)}`;
-    if (key === this.staticKey && now - this.lastStatic < 1800) return;
-    this.staticKey = key;
-    this.lastStatic = now;
-    const rangeKm = Math.max(7, Math.min(60, alt * 3 + 6));
-    const scaleUp = Math.max(1, alt / 5);
-    const camX = ((cam.lon + Math.PI) / (Math.PI * 2)) * W;
-    const camY = ((Math.PI / 2 - cam.lat) / Math.PI) * H;
-    const kx = kmPerCellX(camY);
-    const cr = Math.ceil(rangeKm / 24) + 1;
-    const counts = { tree: 0, crown: 0, bush: 0, rock: 0, ore: 0 };
-    this.nodeInfo.length = 0;
-    this.bldInfo.length = 0;
-    const cells: { cell: number; d: number; dx: number; cy: number }[] = [];
-    for (let dy = -cr; dy <= cr; dy++) {
-      const cy = Math.floor(camY) + dy;
-      if (cy < 0 || cy >= H) continue;
-      for (let dx = -Math.ceil(cr * (24 / Math.max(6, kx))); dx <= Math.ceil(cr * (24 / Math.max(6, kx))); dx++) {
-        const cx = ((Math.floor(camX) + dx) % W + W) % W;
-        const cell = idx(cx, cy);
-        if (w.planet.ocean[cell]) continue;
-        cells.push({ cell, d: Math.hypot(dx * kx, dy * 24.5), dx, cy });
-      }
+    if ((st !== this.stamp || terrainVersion !== this.terrainStamp) && now - this.lastStatic > 450) {
+      this.stamp = st;
+      this.terrainStamp = terrainVersion;
+      this.lastStatic = now;
+      this.buildStatic(target, day);
     }
-    cells.sort((a, b) => a.d - b.d);
-    const day = renderDay;
-    for (const c of cells) {
-      if (c.d > rangeKm + 20) break;
-      const list = w.res.nodes(c.cell);
-      for (const n of list) {
-        const nx = Math.floor(camX) + c.dx + (n.x - Math.floor(n.x));
-        const dKm = Math.hypot((nx - camX) * kx, (n.y - camY) * 24.5);
-        if (dKm > rangeKm) continue;
-        const amt = w.res.amount(c.cell, n.slot, day);
-        const frac = amt / n.max;
-        this.place(n.x, n.y, 0, tmpP, tmpN);
-        tmpQ.setFromUnitVectors(Y, tmpN);
-        if (n.kind === 'tree') {
-          const sp = w.flora.at(Math.floor(c.cy / RF) * RW + Math.floor((c.cell % W) / RF));
-          const k = Math.min(48, Math.ceil(frac * n.max / 4));
-          const rr = new Rng(mix32(c.cell, n.slot + 91));
-          for (let i = 0; i < k && counts.tree < 13500; i++) {
-            const a = rr.next() * Math.PI * 2;
-            const d = Math.sqrt(rr.next()) * (0.25 + 0.004 * n.max);
-            const tx = n.x + (Math.cos(a) * d) / kx;
-            const ty = n.y + (Math.sin(a) * d) / 24.5;
-            this.place(tx, ty, 0, tmpP, tmpN);
-            tmpQ.setFromUnitVectors(Y, tmpN);
-            const h = (0.011 + rr.next() * 0.007) * Math.min(scaleUp, 6) * (0.6 + 0.4 * (sp.growYears / 60));
-            tmpS.set(h, h, h);
-            tmpM.compose(tmpP, tmpQ, tmpS);
-            this.trunks.setMatrixAt(counts.tree, tmpM);
-            hsl(sp.hue + (rr.next() - 0.5) * 0.03, 0.5, 0.2 + rr.next() * 0.1);
-            this.crowns.setMatrixAt(counts.tree, tmpM);
-            this.crowns.setColorAt(counts.tree, tmpC);
-            counts.tree++;
+    this.pickables = this.staticPicks.slice();
+    this.updatePeople(cam, target, alpha, time, camAlt);
+    this.updateAnimals(target, day, time, camAlt);
+    this.updateVehicles(target, day, camAlt);
+    this.updateSea(target, day, time, camAlt);
+  }
+
+  /** Whales, sharks, seals and turtles at the surface, as many as the sea's simulated populations allow. */
+  private updateSea(target: [number, number, number], day: number, time: number, camAlt: number) {
+    const m = this.c.marine;
+    let n = 0;
+    if (m && camAlt < 15) {
+      const r0 = Math.hypot(target[0], target[1], target[2]);
+      const tx = ((Math.atan2(target[2], target[0]) + Math.PI) / (Math.PI * 2)) * W, ty = ((Math.PI / 2 - Math.asin(target[1] / r0)) / Math.PI) * H;
+      const kinds: [Uint8Array, number, number, number][] = [[m.whale, 14, 0x3a4048, 3], [m.shark, 3.5, 0x6a7078, 5], [m.seal, 1.8, 0x5a5048, 6], [m.turtle, 1.1, 0x4f5a3a, 5]];
+      const p3: [number, number, number] = [0, 0, 0];
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const ry = Math.floor(ty / 4) + dy;
+        if (ry < 0 || ry >= H / 4) continue;
+        const rx = (((Math.floor(tx / 4) + dx) % (W / 4)) + W / 4) % (W / 4);
+        const r = ry * (W / 4) + rx;
+        kinds.forEach(([dens, len, col, maxN], ki) => {
+          const k = Math.round((dens[r] / 255) * maxN);
+          for (let j = 0; j < k && n < 600; j++) {
+            const h = (r * 2654435761 + ki * 97 + j * 7919) >>> 0;
+            const period = 0.6 + (h % 100) / 100;
+            const ang = (day / period) * Math.PI * 2 * 0.02 + (h % 628) / 100;
+            const cx = rx * 4 + 0.5 + ((h >>> 8) % 300) / 100, cy = ry * 4 + 0.5 + ((h >>> 16) % 300) / 100;
+            const x = cx + Math.cos(ang) * 0.06, y = cy + Math.sin(ang) * 0.06;
+            const cell = Math.floor(y) * W + (((Math.floor(x) % W) + W) % W);
+            if (!this.c.planet.ocean[cell]) continue;
+            const surf = Math.sin(time * (0.25 + (h % 7) * 0.03) + j) ;
+            const lift = (surf > 0.4 ? 0 : -0.006) + (ki === 0 && surf > 0.92 ? 0.002 * (surf - 0.92) * 12 : 0);
+            const lon = lonOfX(x), lat = latOfY(y), cl = Math.cos(lat);
+            const R = R_KM + lift + 0.0002;
+            p3[0] = cl * Math.cos(lon) * R; p3[1] = Math.sin(lat) * R; p3[2] = cl * Math.sin(lon) * R;
+            if (this.kmTo(p3, target) > 12) continue;
+            const L = len * KM * (0.8 + ((h >>> 4) % 40) / 100);
+            this.sea.setMatrixAt(n, this.place(p3, ang + Math.PI / 2, L, L, L));
+            this.sea.setColorAt(n, tmpC.setHex(col));
+            n++;
           }
-          this.nodeInfo.push({ kind: 'tree', cell: c.cell, slot: n.slot, x: tmpP.x, y: tmpP.y, z: tmpP.z });
-          continue;
-        }
-        const s0 = Math.min(scaleUp, 6);
-        if (n.kind === 'bush' && counts.bush < 2900) {
-          const k = frac > 0.1 ? 1 : 0;
-          if (!k) continue;
-          tmpS.set(0.006 * s0, 0.005 * s0 * (0.4 + frac * 0.6), 0.006 * s0);
-          tmpM.compose(tmpP, tmpQ, tmpS);
-          this.bushes.setMatrixAt(counts.bush, tmpM);
-          tmpC.setHSL(0.33, 0.45, 0.25).lerp(new THREE.Color(0xb5203a), frac > 0.5 ? (frac - 0.5) : 0);
-          this.bushes.setColorAt(counts.bush, tmpC);
-          counts.bush++;
-        } else if ((n.kind === 'stone' || n.kind === 'clay') && counts.rock < 2400) {
-          const size = (n.kind === 'stone' ? 0.012 : 0.008) * s0 * (0.5 + frac * 0.5);
-          tmpS.set(size, size * (n.kind === 'clay' ? 0.35 : 1), size);
-          tmpM.compose(tmpP, tmpQ, tmpS);
-          this.rocks.setMatrixAt(counts.rock, tmpM);
-          tmpC.setHex(n.kind === 'stone' ? 0x8d8d92 : 0xa8553a);
-          this.rocks.setColorAt(counts.rock, tmpC);
-          counts.rock++;
-        } else if (ORE_COLOR[n.kind] !== undefined && counts.ore < 1400) {
-          if (!w.res.known.size || ![...w.res.known.values()].some((set) => set.has(c.cell * 64 + n.slot))) continue;
-          const size = 0.008 * s0 * (0.5 + frac * 0.5);
-          tmpS.set(size, size * 1.2, size);
-          tmpM.compose(tmpP, tmpQ, tmpS);
-          this.ores.setMatrixAt(counts.ore, tmpM);
-          tmpC.setHex(ORE_COLOR[n.kind]!);
-          this.ores.setColorAt(counts.ore, tmpC);
-          counts.ore++;
-        } else continue;
-        this.nodeInfo.push({ kind: n.kind, cell: c.cell, slot: n.slot, x: tmpP.x, y: tmpP.y, z: tmpP.z });
+        });
       }
     }
-    // ---- buildings & fields ----
-    let wi = 0, fi = 0;
-    for (const s of w.activeSettlements()) {
-      const dK = Math.hypot((((s.x - camX + W * 1.5) % W) - W / 2) * kx, (s.y - camY) * 24.5);
-      if (dK > rangeKm + 4) continue;
-      const cul = w.cultures.get(s.culture);
-      for (const b of w.buildings.of(s.id)) {
-        if (b.done === -2) continue;
-        const def = BDEFS[b.kind];
-        this.place(b.x, b.y, -0.002, tmpP, tmpN);
-        tmpQ.setFromUnitVectors(Y, tmpN);
-        tmpQ2.setFromAxisAngle(tmpN, b.rot);
-        tmpQ.premultiply(tmpQ2);
-        if (b.kind === 'field') {
-          if (fi >= 4900) continue;
-          const g = b.fstate === 0 ? 0 : b.fstate === 2 ? 1 : Math.min(0.95, (w.day - b.planted) / GROW_DAYS);
-          const sz = def.size * Math.min(scaleUp, 2.5) * (b.done < 0 ? 0.35 + 0.65 * b.progress : 1);
-          tmpS.set(sz, 1, sz);
-          tmpM.compose(tmpP, tmpQ, tmpS);
-          this.fields.setMatrixAt(fi, tmpM);
-          if (b.fstate === 0) tmpC.setHex(0x6b5233);
-          else if (b.fstate === 2) tmpC.setHSL(0.13, 0.75, 0.52);
-          else tmpC.setHSL(0.28, 0.6, 0.25 + 0.2 * g).lerp(new THREE.Color(0x8a5a2b), b.weeds > 0.5 ? (b.weeds - 0.5) * 0.6 : 0);
-          this.fields.setColorAt(fi, tmpC);
-          fi++;
-          continue;
+    this.sea.count = n;
+    this.sea.instanceMatrix.needsUpdate = true;
+    if (this.sea.instanceColor) this.sea.instanceColor.needsUpdate = true;
+  }
+
+  private updatePeople(cam: [number, number, number], target: [number, number, number], alpha: number, time: number, camAlt: number) {
+    const P = this.c.people;
+    let n = 0, nc = 0, nb = 0;
+    this.personPos.clear();
+    const p3: [number, number, number] = [0, 0, 0];
+    const range = Math.max(2.5, Math.min(8, camAlt * 3));
+    if (camAlt < 12) {
+      for (let i = 0; i < P.n && n < 8000; i++) {
+        let dx = P.x[i] - P.px[i];
+        if (dx > W / 2) dx -= W;
+        if (dx < -W / 2) dx += W;
+        const x = P.px[i] + dx * alpha, y = P.py[i] + (P.y[i] - P.py[i]) * alpha;
+        const a = unpackPerson(P.attr[i]);
+        const sail = a.act === ACT.sail;
+        this.ground(x, y, 0, p3);
+        if (sail) { const r = Math.hypot(p3[0], p3[1], p3[2]); const k = (R_KM + 0.0004) / r; if (k > 1) { p3[0] *= k; p3[1] *= k; p3[2] *= k; } }
+        this.personPos.set(P.id[i], [p3[0], p3[1], p3[2]]);
+        if (this.kmTo(p3, target) > range) continue;
+        const sc = (a.age === 0 ? 0.62 : a.age === 2 ? 0.95 : 1) * (a.female ? 0.95 : 1) * KM;
+        // leave out only someone the observer's eye is actually inside: within 0.4 m of their body's axis, feet to head
+        {
+          const r = Math.hypot(p3[0], p3[1], p3[2]);
+          const vx = cam[0] - p3[0], vy = cam[1] - p3[1], vz = cam[2] - p3[2];
+          const along = Math.min(1.7 * sc, Math.max(0, (vx * p3[0] + vy * p3[1] + vz * p3[2]) / r));
+          if (Math.hypot(vx - (p3[0] / r) * along, vy - (p3[1] / r) * along, vz - (p3[2] / r) * along) < 0.4 * KM) continue;
         }
-        if (wi >= 6900) continue;
-        const sz = def.size * scaleUp;
-        const tall = b.kind === 'temple' ? 1.7 : b.kind === 'tower' ? 2.8 : b.kind === 'stonehouse' ? 0.78 : b.kind === 'hall' ? 0.9 : b.kind === 'well' ? 0.5 : 0.6;
-        const prog = b.done < 0 ? 0.15 + 0.85 * b.progress : 1;
-        tmpS.set(sz, sz * tall * prog, sz);
-        tmpM.compose(tmpP, tmpQ, tmpS);
-        this.walls.setMatrixAt(wi, tmpM);
-        const base = b.kind === 'stonehouse' || b.kind === 'temple' || b.kind === 'tower' || b.kind === 'well' || b.kind === 'smithy' ? [0.1, 0.05, 0.62] : b.kind === 'brickhouse' || b.kind === 'kiln' ? [0.04, 0.45, 0.5] : [0.09, 0.35, 0.4];
-        hsl(((cul ? cul.color : 0.1) * 0.15 + base[0]) % 1, base[1], base[2]);
-        this.walls.setColorAt(wi, b.done < 0 ? tmpC.clone().multiplyScalar(0.7) : tmpC);
-        const roofy = HOUSING.includes(b.kind) || ['granary', 'workshop', 'market', 'hall'].includes(b.kind);
-        if (roofy && b.done >= 0) {
-          tmpS.set(sz, sz * tall, sz);
-          tmpM.compose(tmpP, tmpQ, tmpS);
-          this.roofs.setMatrixAt(wi, tmpM);
-          tmpC.setHSL(b.kind === 'hut' ? 0.1 : b.kind === 'house' ? 0.06 : 0.02, 0.5, b.kind === 'hut' ? 0.38 : 0.34);
-          this.roofs.setColorAt(wi, tmpC);
-        } else {
-          tmpS.set(0, 0, 0);
-          tmpM.compose(tmpP, tmpQ, tmpS);
-          this.roofs.setMatrixAt(wi, tmpM);
-          this.roofs.setColorAt(wi, tmpC);
+        const heading = Math.atan2(dx, -(P.y[i] - P.py[i])) || (P.id[i] % 628) / 100;
+        const walking = a.act === ACT.walk || (Math.abs(dx) + Math.abs(P.y[i] - P.py[i]) > 1e-7 && a.act !== ACT.sleep);
+        const bob = walking ? Math.abs(Math.sin(time * 9 + P.id[i])) * 0.04 * KM : a.act === ACT.work || a.act === ACT.build ? Math.abs(Math.sin(time * 5 + P.id[i])) * 0.06 * KM : 0;
+        if (bob) { const r = Math.hypot(p3[0], p3[1], p3[2]); const k = (r + bob) / r; p3[0] *= k; p3[1] *= k; p3[2] *= k; }
+        const m = this.place(p3, heading, sc, sc, sc, a.act === ACT.sleep ? 1 : 0);
+        this.people.setMatrixAt(n, m);
+        const sel = this.selected?.kind === 'person' && this.selected.id === P.id[i];
+        const clothing = hsl(a.hue, a.band === 3 ? 0.25 : 0.5, a.female ? 0.5 : 0.4);
+        tmpC.setRGB(clothing[0], clothing[1], clothing[2]);
+        if (a.band === 3) tmpC.setRGB(0.55, 0.15, 0.12);
+        if (sel) tmpC.setRGB(1.6, 1.4, 0.7);
+        this.people.setColorAt(n, tmpC);
+        n++;
+        if (a.cargo && a.cargoAmt > 0 && nc < 8000) {
+          const s2 = sc * (0.7 + Math.min(1, a.cargoAmt / 24) * 0.8);
+          this.cargo.setMatrixAt(nc, this.place(p3, heading, s2, s2, s2));
+          const col = [0, 0xd9b45a, 0x8a5a2b, 0x8b8b8b, 0xb85a3a, 0x555566, 0xb0b8c4, 0xf0c53a, 0xb07ab8][a.cargo] ?? 0x888888;
+          this.cargo.setColorAt(nc, tmpC.setHex(col));
+          nc++;
         }
-        this.bldInfo.push({ id: b.id, x: tmpP.x, y: tmpP.y, z: tmpP.z });
-        wi++;
+        if (sail && nb < 2000) {
+          this.skiffs.setMatrixAt(nb, this.place(p3, heading, KM, KM, KM));
+          this.skiffs.setColorAt(nb, tmpC.setHex(0xffffff));
+          nb++;
+        }
+        this.pickables.push({ kind: 'person', id: P.id[i], p: [p3[0], p3[1], p3[2]] });
       }
     }
-    this.trunks.count = this.crowns.count = counts.tree;
-    this.bushes.count = counts.bush;
-    this.rocks.count = counts.rock;
-    this.ores.count = counts.ore;
-    this.walls.count = this.roofs.count = wi;
-    this.fields.count = fi;
-    for (const m of [this.trunks, this.crowns, this.bushes, this.rocks, this.ores, this.walls, this.roofs, this.fields]) {
-      m.instanceMatrix.needsUpdate = true;
-      if (m.instanceColor) m.instanceColor.needsUpdate = true;
-    }
-    void camera;
+    this.people.count = n;
+    this.cargo.count = nc;
+    this.skiffs.count = nb;
+    for (const m of [this.people, this.cargo, this.skiffs]) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
   }
 
-  private updateRing(cam: CameraRig, alpha: number, time: number) {
-    const sel = this.selected;
-    this.ring.visible = false;
-    if (!sel) return;
-    let pos: THREE.Vector3 | null = null;
-    const n = new THREE.Vector3();
-    if (sel.kind === 'person') {
-      const p = this.world.people.get(sel.id);
-      if (p && p.alive) { pos = new THREE.Vector3(); this.personPos(p, alpha, pos, n); }
-    } else if (sel.kind === 'settlement') {
-      const s = this.world.settlements[sel.id - 1];
-      if (s && s.abandoned < 0) { pos = new THREE.Vector3(); this.place(s.x, s.y, 0.5, pos, n); }
-    } else if (sel.kind === 'building') {
-      const b = this.world.buildings.get(sel.id);
-      if (b) { pos = new THREE.Vector3(); this.place(b.x, b.y, 0.05, pos, n); }
-    } else if (sel.kind === 'node' && sel.extra !== undefined) {
-      const node = this.world.res.nodes(sel.id)[sel.extra];
-      if (node) { pos = new THREE.Vector3(); this.place(node.x, node.y, 0.05, pos, n); }
+  private updateAnimals(target: [number, number, number], day: number, time: number, camAlt: number) {
+    const counts = [0, 0, 0];
+    const p3: [number, number, number] = [0, 0, 0];
+    if (camAlt < 10) {
+      const eco = this.c.eco;
+      for (const pop of this.c.animals) {
+        const k = eco.markerCount(pop as never);
+        const herd = Math.max(1, Math.min(9, Math.round(pop.n / Math.max(1, k) / 25)));
+        for (let m = 0; m < k; m++) {
+          const mp = eco.markerPos(pop as never, m, day);
+          if (!mp) continue;
+          this.ground(mp.x, mp.y, 0, p3);
+          if (this.kmTo(p3, target) > 4) continue;
+          for (let j = 0; j < herd; j++) {
+            const d = pop.diet;
+            if (counts[d] >= 3000) break;
+            const h = (pop.sp * 7919 + m * 104729 + j * 1299709) >>> 0;
+            const ang = (h % 6283) / 1000, dist = (((h >>> 12) % 1000) / 1000) * 0.03 * Math.sqrt(herd);
+            const kx = 1 / (24.5 * Math.max(0.1, Math.cos(latOfY(mp.y)))), ky = 1 / 24.5;
+            const graze = Math.sin(time * 0.3 + j) * 0.002;
+            const q = this.ground(mp.x + Math.cos(ang) * (dist + graze) * kx, mp.y + Math.sin(ang) * (dist + graze) * ky, 0, [0, 0, 0]);
+            const len = Math.max(0.25, pop.size * 0.9) * KM;
+            const mesh = this.animals[d];
+            mesh.setMatrixAt(counts[d], this.place(q, ang + Math.sin(day * 30 + j) * 0.6, len, len, len));
+            const col = hsl(pop.hue, d === 2 ? 0.45 : 0.3, d === 2 ? 0.3 : 0.38);
+            mesh.setColorAt(counts[d], tmpC.setRGB(col[0], col[1], col[2]));
+            counts[d]++;
+            if (j === 0) this.pickables.push({ kind: 'animal', id: pop.sp, p: q });
+          }
+        }
+      }
     }
-    if (!pos) return;
-    this.ring.visible = true;
-    this.ring.position.copy(pos);
-    this.ring.quaternion.setFromUnitVectors(Z, n);
-    const base = Math.max(0.05, cam.alt * 0.012) * (sel.kind === 'settlement' ? 2.2 : sel.kind === 'person' ? 1 : 1.6);
-    this.ring.scale.setScalar(base * (1 + 0.12 * Math.sin(time * 4)));
+    this.animals.forEach((mesh, d) => { mesh.count = counts[d]; mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true; });
   }
 
-  private updatePings(cam: CameraRig) {
-    const now = performance.now();
-    this.pingState = this.pingState.filter((p) => now - p.t0 < 7000);
-    for (let i = 0; i < this.pings.length; i++) {
-      const m = this.pings[i];
-      const st = this.pingState[i];
-      if (!st) { m.visible = false; continue; }
-      const t = (now - st.t0) / 7000;
-      m.visible = true;
-      const n = new THREE.Vector3();
-      this.place(st.x, st.y, 0.8, m.position, n);
-      m.quaternion.setFromUnitVectors(Z, n);
-      m.scale.setScalar((6 + t * 40) * Math.max(1, cam.alt / 800));
-      const mat = m.material as THREE.MeshBasicMaterial;
-      mat.color.setHex(st.color);
-      mat.opacity = 0.9 * (1 - t);
+  private updateVehicles(target: [number, number, number], day: number, camAlt: number) {
+    let ns = 0, nm = 0, np = 0, nt = 0;
+    const tp = this.trails.geometry.attributes.position as THREE.BufferAttribute;
+    const p3: [number, number, number] = [0, 0, 0];
+    for (const r of this.c.skyState.routes) {
+      const a = this.c.settlementById.get(r.a), b = this.c.settlementById.get(r.b);
+      if (!a || !b) continue;
+      for (let k = 0; k < r.fleet; k++) {
+        const v = this.c.space.vehicleT(r, k, day);
+        if (r.kind === 'sea') {
+          const pt = alongPath(r.path, v.back ? 1 - v.t : v.t);
+          if (!pt) continue;
+          const lon = lonOfX(pt.x), lat = latOfY(pt.y), cl = Math.cos(lat);
+          const R = R_KM + 0.0008;
+          p3[0] = cl * Math.cos(lon) * R; p3[1] = Math.sin(lat) * R; p3[2] = cl * Math.sin(lon) * R;
+          if (this.kmTo(p3, target) > 80) continue;
+          const heading = Math.atan2(pt.dx, -pt.dy) + (v.back ? Math.PI : 0);
+          const era = Math.max(a.era, b.era);
+          if (era >= 2 && nm < 400) { this.steamships.setMatrixAt(nm++, this.place(p3, heading, KM, KM, KM)); }
+          else if (ns < 400) { this.sailships.setMatrixAt(ns++, this.place(p3, heading, KM, KM, KM)); }
+        } else if (np < 300) {
+          const t = v.back ? 1 - v.t : v.t;
+          const from = v.back ? b : a, to = v.back ? a : b;
+          const g = greatCircle(from.x, from.y, to.x, to.y, t);
+          const climb = Math.min(1, t * 12, (1 - t) * 12);
+          const R = R_KM + 0.002 + 9.5 * climb;
+          p3[0] = g.d[0] * R; p3[1] = g.d[1] * R; p3[2] = g.d[2] * R;
+          if (this.kmTo(p3, target) > 160) continue;
+          this.planes.setMatrixAt(np++, this.place(p3, g.heading, KM, KM, KM));
+          if (climb > 0.95 && nt < 300) {
+            const back = greatCircle(from.x, from.y, to.x, to.y, Math.max(0, t - 12 / Math.max(50, r.km)));
+            const q = [back.d[0] * R, back.d[1] * R, back.d[2] * R];
+            tp.setXYZ(nt * 2, p3[0] - this.anchor[0], p3[1] - this.anchor[1], p3[2] - this.anchor[2]);
+            tp.setXYZ(nt * 2 + 1, q[0] - this.anchor[0], q[1] - this.anchor[1], q[2] - this.anchor[2]);
+            nt++;
+          }
+        }
+      }
     }
+    this.sailships.count = ns; this.steamships.count = nm; this.planes.count = np;
+    for (const m of [this.sailships, this.steamships, this.planes]) m.instanceMatrix.needsUpdate = true;
+    this.trails.geometry.setDrawRange(0, nt * 2);
+    tp.needsUpdate = true;
+    void camAlt;
   }
 
-  /** Nearest thing to a screen position (the observer never commands, only inspects). */
-  pick(sx: number, sy: number, camera: THREE.PerspectiveCamera, vw: number, vh: number, alpha: number, radiusPx = 16): Pick | null {
-    const w = this.world;
-    let best: Pick | null = null;
-    let bd = radiusPx * radiusPx;
-    const v = new THREE.Vector3();
-    const n = new THREE.Vector3();
-    const proj = (p: THREE.Vector3) => {
-      v.copy(p).project(camera);
-      if (v.z > 1 || v.z < -1) return null;
-      return { x: (v.x * 0.5 + 0.5) * vw, y: (-v.y * 0.5 + 0.5) * vh };
+  // ---------------------------------------------------------------- static layer
+  private buildStatic(target: [number, number, number], day: number) {
+    const c = this.c;
+    const picks: Pickable[] = [];
+    const p3: [number, number, number] = [0, 0, 0];
+    const counts = new Map<BKind, number>();
+    const clear: { p: [number, number, number]; r: number }[] = [];
+    // ---- buildings
+    const B = c.buildings;
+    const fieldPos: number[] = [], fieldCol: number[] = [], fieldNorm: number[] = [];
+    const extent = new Map<number, number>();
+    if (B) {
+      for (let i = 0; i < B.n; i++) {
+        const kind = BKINDS[B.kind[i]];
+        const done = (B.state[i] & 1) === 1;
+        this.ground(B.x[i], B.y[i], 0, p3);
+        const dist = this.kmTo(p3, target);
+        if (dist > 12) continue;
+        const s = c.settlementById.get(B.sid[i]);
+        if (s && !RINGS.includes(kind) && kind !== 'field' && !['dock', 'airport', 'launchpad', 'factory', 'powerplant'].includes(kind)) {
+          const sp = this.ground(s.x, s.y, 0, [0, 0, 0]);
+          extent.set(s.id, Math.max(extent.get(s.id) ?? 0, this.kmTo(p3, sp)));
+        }
+        if (kind === 'field') {
+          this.fieldQuad(B.x[i], B.y[i], B.rot[i], done ? B.progress[i] : B.progress[i] * 0.6 + 0.3, (B.state[i] >> 1) & 3, B.growth[i], fieldPos, fieldCol, fieldNorm);
+          clear.push({ p: [p3[0], p3[1], p3[2]], r: 0.075 });
+          picks.push({ kind: 'building', id: B.id[i], p: [p3[0], p3[1], p3[2]] });
+          continue;
+        }
+        if (RINGS.includes(kind)) continue;
+        const mesh = this.buildings.get(kind);
+        if (!mesh) continue;
+        const n = counts.get(kind) ?? 0;
+        if (n >= 6000) continue;
+        const prog = done ? 1 : 0.12 + 0.88 * B.progress[i];
+        mesh.setMatrixAt(n, this.place(p3, B.rot[i], KM, KM * prog, KM));
+        const tint = hsl(B.hue[i], 0.25, 0.75);
+        tmpC.setRGB(0.55 + tint[0] * 0.45, 0.55 + tint[1] * 0.45, 0.55 + tint[2] * 0.45);
+        if (!done) tmpC.multiplyScalar(0.65);
+        if (this.selected?.kind === 'building' && this.selected.id === B.id[i]) tmpC.setRGB(1.5, 1.35, 0.8);
+        mesh.setColorAt(n, tmpC);
+        counts.set(kind, n + 1);
+        clear.push({ p: [p3[0], p3[1], p3[2]], r: BDEFS[kind].size * 0.9 + 0.006 });
+        picks.push({ kind: 'building', id: B.id[i], p: [p3[0], p3[1], p3[2]] });
+      }
+    }
+    for (const [k, mesh] of this.buildings) { mesh.count = counts.get(k) ?? 0; mesh.instanceMatrix.needsUpdate = true; if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true; }
+    // fields
+    const fg = new THREE.BufferGeometry();
+    fg.setAttribute('position', new THREE.Float32BufferAttribute(fieldPos, 3));
+    fg.setAttribute('normal', new THREE.Float32BufferAttribute(fieldNorm, 3));
+    fg.setAttribute('color', new THREE.Float32BufferAttribute(fieldCol, 3));
+    this.fields.geometry.dispose();
+    this.fields.geometry = fg;
+    // ---- walls: a ring of palisade or stone around the built-up area
+    let np = 0, nw = 0, nt = 0;
+    for (const s of c.settlements) {
+      if (!s.walls) continue;
+      const cp = this.ground(s.x, s.y, 0, [0, 0, 0]);
+      if (this.kmTo(cp, target) > 10) continue;
+      const rad = (extent.get(s.id) ?? 0.06) + 0.02;
+      const segLen = 0.001;
+      const nSeg = Math.floor((2 * Math.PI * rad) / segLen);
+      const kx = 1 / (24.5 * Math.max(0.1, Math.cos(latOfY(s.y)))), ky = 1 / 24.5;
+      for (let i = 0; i < nSeg; i++) {
+        if (i % 160 < 6) continue; // gates
+        const a = (i / nSeg) * Math.PI * 2;
+        const q = this.ground(s.x + Math.cos(a) * rad * kx, s.y + Math.sin(a) * rad * ky, 0, [0, 0, 0]);
+        const heading = Math.atan2(-Math.sin(a), -Math.cos(a)) + Math.PI / 2;
+        if (s.walls === 2) {
+          if (nw < 12000) this.stoneWall.setMatrixAt(nw++, this.place(q, heading + Math.PI / 2, KM, KM, KM));
+          if (i % 90 === 0 && nt < 400) this.towers.setMatrixAt(nt++, this.place(q, 0, KM, KM, KM));
+        } else if (np < 12000) this.palisade.setMatrixAt(np++, this.place(q, heading + Math.PI / 2, KM, KM, KM));
+      }
+    }
+    this.palisade.count = np; this.stoneWall.count = nw; this.towers.count = nt;
+    for (const m of [this.palisade, this.stoneWall, this.towers]) m.instanceMatrix.needsUpdate = true;
+    // ---- resource sites: outcrops, ore, clay, berry bushes (and the groves that thin the forest)
+    const groves: { p: [number, number, number]; r: number; frac: number }[] = [];
+    let nr = 0, no = 0;
+    const camMx = ((Math.atan2(target[2], target[0]) + Math.PI) / (Math.PI * 2)) * W;
+    const camMy = ((Math.PI / 2 - Math.asin(target[1] / Math.hypot(target[0], target[1], target[2]))) / Math.PI) * H;
+    const shrubs: { p: [number, number, number]; s: number; berries: number; key: number }[] = [];
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const cy = Math.floor(camMy) + dy;
+      if (cy < 0 || cy >= H) continue;
+      const cell = idx(wrapX(Math.floor(camMx) + dx), cy);
+      for (const nd of c.res.nodes(cell)) {
+        const key = cell * 64 + nd.slot;
+        const frac = c.nodeFrac.get(key) ?? 1;
+        const q = this.ground(nd.x, nd.y, 0, [0, 0, 0]);
+        const dist = this.kmTo(q, target);
+        if (nd.kind === 'tree') { groves.push({ p: q, r: 0.12 + 0.0025 * nd.max, frac }); continue; }
+        if (dist > 5 || nd.kind === 'fish') continue;
+        if (nd.kind === 'bush') { shrubs.push({ p: q, s: 2.2, berries: frac, key }); picks.push({ kind: 'node', id: cell, extra: nd.slot, p: q }); continue; }
+        const hidden = ['copper', 'iron', 'coal', 'gold', 'clay'].includes(nd.kind) && !c.known.has(key);
+        if (hidden) continue;
+        const rr = (key * 2654435761) >>> 0;
+        const k = nd.kind === 'stone' ? 6 : 3;
+        for (let j = 0; j < k; j++) {
+          const h = (rr ^ (j * 40503)) >>> 0;
+          const ang = (h % 6283) / 1000, dd = ((h >>> 13) % 1000) / 1000 * 0.012;
+          const kx = 1 / (24.5 * Math.max(0.1, Math.cos(latOfY(nd.y)))), ky = 1 / 24.5;
+          const qq = this.ground(nd.x + Math.cos(ang) * dd * kx, nd.y + Math.sin(ang) * dd * ky, 0, [0, 0, 0]);
+          const size = (nd.kind === 'stone' ? 2 + ((h >>> 5) % 100) / 22 : 1.4) * Math.max(0.25, frac) * KM;
+          if (nd.kind === 'stone') {
+            if (nr < 30000) { this.rocks.setMatrixAt(nr, this.place(qq, ang, size, size, size)); this.rocks.setColorAt(nr, tmpC.setHex(0x9a958c)); nr++; }
+          } else if (no < 3000) {
+            const col = nd.kind === 'clay' ? 0xa8553a : nd.kind === 'copper' ? 0xc86f3a : nd.kind === 'iron' ? 0x7a4a3a : nd.kind === 'coal' ? 0x1e1e22 : 0xf0c53a;
+            this.ores.setMatrixAt(no, this.place(qq, ang, size, nd.kind === 'clay' ? size * 0.25 : size, size));
+            this.ores.setColorAt(no, tmpC.setHex(col));
+            no++;
+          }
+        }
+        picks.push({ kind: 'node', id: cell, extra: nd.slot, p: q });
+      }
+    }
+    // ---- forests from the terrain lattice, thinned by what the simulation says is growing there
+    // towns clear the land around them for firewood, timber and pasture; the woods thin out for a while beyond
+    const towns: { p: [number, number, number]; r: number }[] = [];
+    for (const st of c.settlements) {
+      const sp = this.ground(st.x, st.y, 0, [0, 0, 0]);
+      if (this.kmTo(sp, target) > 8) continue;
+      towns.push({ p: sp, r: (extent.get(st.id) ?? 0.03) + 0.04 + Math.sqrt(Math.max(0, st.pop)) * 0.006 });
+    }
+    const clearHash = new SpatialHash<{ p: [number, number, number]; r: number }>(0.12);
+    for (const g of clear) clearHash.add(g.p, g.r, g);
+    const groveHash = new SpatialHash<{ p: [number, number, number]; r: number; frac: number }>(0.6);
+    for (const g of groves) if (g.frac < 0.999) groveHash.add(g.p, g.r, g);
+    const env = c.env;
+    let ntr = 0;
+    const nc = [0, 0, 0, 0];
+    const flora = c.flora;
+    const season = Math.sin(((day % 360) - 90) / 360 * Math.PI * 2);
+    const anchor = this.anchor;
+    for (const tc of this.terrain.treeChunks) {
+      const t = tc.trees;
+      for (let k = 0; k < t.length; k += 8) {
+        const px = t[k] + tc.center[0], py = t[k + 1] + tc.center[1], pz = t[k + 2] + tc.center[2];
+        const q: [number, number, number] = [px, py, pz];
+        const d = Math.hypot(px - target[0], py - target[1], pz - target[2]);
+        if (d > 4) continue;
+        const type = t[k + 5], hgt = t[k + 3], crown = t[k + 4], hv = t[k + 6], cell = t[k + 7];
+        if (type === 4) {
+          if (nr < 30000) { const s = hgt; this.rocks.setMatrixAt(nr, this.place(q, hv * 6.28, crown, s, crown)); this.rocks.setColorAt(nr, tmpC.setHex(0x8a857c)); nr++; }
+          continue;
+        }
+        // is the forest still standing here? (trees outlast winter; farmland and felled groves do not keep them)
+        if (env && env.cultivated[cell] && ((hv * 5.3) % 1) > 0.25) continue;
+        let skip = false;
+        for (const tw of towns) {
+          const dt = Math.hypot(tw.p[0] - px, tw.p[1] - py, tw.p[2] - pz);
+          if (dt < tw.r || (dt < tw.r * 2.2 && ((hv * 11.7) % 1) > (dt - tw.r) / (tw.r * 1.2))) { skip = true; break; }
+        }
+        if (skip) continue;
+        for (const g of clearHash.near(px, py, pz)) { if (Math.hypot(g.p[0] - px, g.p[1] - py, g.p[2] - pz) < g.r) { skip = true; break; } }
+        if (skip) continue;
+        for (const g of groveHash.near(px, py, pz)) {
+          if (Math.hypot(g.p[0] - px, g.p[1] - py, g.p[2] - pz) < g.r && ((hv * 7.13) % 1) > g.frac) { skip = true; break; }
+        }
+        if (skip) continue;
+        const burn = env ? env.burn[cell] : 0;
+        const dead = burn >= 64 && burn < 128 && ((hv * 3.7) % 1) < burn / 127;
+        if (ntr >= 90000) break;
+        this.trunks.setMatrixAt(ntr, this.place(q, hv * 6.28, hgt * (type === 2 ? 0.35 : 0.55), hgt, hgt * (type === 2 ? 0.35 : 0.55)));
+        this.trunks.setColorAt(ntr, tmpC.setHex(dead ? 0x2a2420 : 0xffffff));
+        ntr++;
+        if (dead) continue;
+        const ct = type === 0 ? 0 : type === 2 ? 2 : type === 3 ? 3 : 1;
+        if (nc[ct] >= 90000) continue;
+        const mesh = this.crowns[ct];
+        mesh.setMatrixAt(nc[ct], this.place(q, hv * 6.28, crown, hgt, crown));
+        const reg = Math.floor(Math.floor(cell / W) / 4) * 64 + Math.floor((cell % W) / 4);
+        const hue = (flora ? flora.hue[reg] : 0.3) + (hv - 0.5) * 0.04;
+        const lat = latOfY(Math.floor(cell / W) + 0.5);
+        const autumn = ct === 1 ? Math.max(0, Math.min(1, 1 - Math.abs(season * Math.sign(lat) + 0.35) / 0.45)) * Math.max(0, Math.min(1, (Math.abs(lat) - 0.35) / 0.3)) : 0;
+        const col = hsl(hue * (1 - autumn) + 0.08 * autumn, ct === 0 ? 0.35 : 0.45, ct === 0 ? 0.2 : 0.26 + 0.06 * hv);
+        tmpC.setRGB(col[0], col[1], col[2]);
+        const snow = env ? Math.min(1, ((env.snow[cell] / 4) ** 2) / 60) : 0;
+        if (snow > 0.2 && ct === 0) tmpC.lerp(new THREE.Color(0.9, 0.92, 0.95), snow * 0.6);
+        mesh.setColorAt(nc[ct], tmpC);
+        nc[ct]++;
+      }
+    }
+    for (const s of shrubs) {
+      if (nc[3] >= 90000) break;
+      for (let j = 0; j < 3; j++) {
+        const h = (s.key * 7 + j * 131) >>> 0;
+        const a = (h % 628) / 100, dd = 0.003 * (j + 1);
+        const r = Math.hypot(s.p[0], s.p[1], s.p[2]);
+        const up = [s.p[0] / r, s.p[1] / r, s.p[2] / r];
+        const side = Math.abs(up[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+        const ex = [up[1] * side[2] - up[2] * side[1], up[2] * side[0] - up[0] * side[2], up[0] * side[1] - up[1] * side[0]];
+        const el = Math.hypot(ex[0], ex[1], ex[2]);
+        const q: [number, number, number] = [s.p[0] + (ex[0] / el) * dd * Math.cos(a), s.p[1] + (ex[1] / el) * dd * Math.cos(a), s.p[2] + (ex[2] / el) * dd * Math.cos(a)];
+        const sz = s.s * KM * (0.7 + 0.3 * s.berries);
+        this.crowns[3].setMatrixAt(nc[3], this.place(q, a, sz * 0.6, sz * 0.7, sz * 0.6));
+        this.crowns[3].setColorAt(nc[3], tmpC.setRGB(0.18 + 0.5 * s.berries * 0.4, 0.32, 0.14));
+        nc[3]++;
+      }
+    }
+    this.trunks.count = ntr;
+    this.crowns.forEach((m, k) => { m.count = nc[k]; });
+    this.rocks.count = nr;
+    this.ores.count = no;
+    for (const m of [this.trunks, ...this.crowns, this.rocks, this.ores]) { m.instanceMatrix.needsUpdate = true; if (m.instanceColor) m.instanceColor.needsUpdate = true; }
+    // settlements are pickable from anywhere
+    for (const s of c.settlements) picks.push({ kind: 'settlement', id: s.id, p: this.ground(s.x, s.y, 0.01, [0, 0, 0]) });
+    this.staticPicks = picks;
+    void anchor;
+  }
+
+  /** A field: a 100 m square of crop rows draped over the ground. */
+  private fieldQuad(x: number, y: number, rot: number, prog: number, fstate: number, growth: number, pos: number[], col: number[], nor: number[]) {
+    const size = BDEFS.field.size * prog; // km
+    const kx = 1 / (24.5 * Math.max(0.1, Math.cos(latOfY(y)))), ky = 1 / 24.5;
+    const cr = Math.cos(rot), sr = Math.sin(rot);
+    const S = 6, ROWS = 12;
+    const at = (u: number, v: number): [number, number, number] => {
+      const lx = (u - 0.5) * size, ly = (v - 0.5) * size;
+      return this.ground(x + (lx * cr - ly * sr) * kx, y + (lx * sr + ly * cr) * ky, 0.0003, [0, 0, 0]);
     };
-    const camN = camera.position.clone().normalize();
-    const consider = (kind: Pick['kind'], id: number, p: THREE.Vector3, k: number, extra?: number) => {
-      const q = proj(p.clone());
-      if (!q) return;
-      const d = (q.x - sx) ** 2 + (q.y - sy) ** 2;
-      if (d < bd * k) { bd = d / k; best = { kind, id, sx: q.x, sy: q.y, extra }; }
-    };
-    for (const s of w.activeSettlements()) {
-      this.place(s.x, s.y, 0.3, v, n);
-      if (n.dot(camN) < 0.05) continue;
-      consider('settlement', s.id, v, 1.8);
+    const base = fstate === 0 ? [0.42, 0.32, 0.2] : fstate === 2 ? [0.78, 0.66, 0.28] : [0.25 + 0.15 * (1 - growth), 0.38 + 0.12 * growth, 0.14];
+    const grid: [number, number, number][] = [];
+    for (let j = 0; j <= S; j++) for (let i = 0; i <= ROWS; i++) grid.push(at(i / ROWS, j / S));
+    for (let j = 0; j < S; j++) for (let i = 0; i < ROWS; i++) {
+      const a = grid[j * (ROWS + 1) + i], b = grid[j * (ROWS + 1) + i + 1], c = grid[(j + 1) * (ROWS + 1) + i], d = grid[(j + 1) * (ROWS + 1) + i + 1];
+      const shade = i % 2 ? 0.86 : 1.04;
+      for (const p of [a, b, c, b, d, c]) {
+        pos.push(p[0] - this.anchor[0], p[1] - this.anchor[1], p[2] - this.anchor[2]);
+        const r = Math.hypot(p[0], p[1], p[2]);
+        nor.push(p[0] / r, p[1] / r, p[2] / r);
+        col.push(base[0] * shade, base[1] * shade, base[2] * shade);
+      }
     }
-    for (const nd of this.nodeInfo) consider('node', nd.cell, v.set(nd.x, nd.y, nd.z), 0.55, nd.slot);
-    for (const b of this.bldInfo) consider('building', b.id, v.set(b.x, b.y, b.z), 0.8);
-    for (let i = 0; i < this.peopleIds.length; i++) {
-      const p = w.people.get(this.peopleIds[i]);
-      if (!p || !p.alive) continue;
-      this.personPos(p, alpha, v, n);
-      consider('person', p.id, v, 1);
-    }
-    const cur = best as Pick | null;
-    if (!cur || cur.kind !== 'person') for (const a of this.animalInfo) consider('animal', a.sp, v.set(a.x, a.y, a.z), 0.9);
-    return best;
   }
 }
-void NR;
+
+/** A point a fraction `t` of the way along a polyline of map coordinates, with its direction. */
+function alongPath(path: number[], t: number): { x: number; y: number; dx: number; dy: number } | null {
+  const n = path.length / 2;
+  if (n < 2) return null;
+  let total = 0;
+  const seg: number[] = [];
+  for (let i = 1; i < n; i++) {
+    let dx = path[i * 2] - path[i * 2 - 2];
+    if (dx > W / 2) dx -= W;
+    if (dx < -W / 2) dx += W;
+    const l = Math.hypot(dx * Math.cos(latOfY(path[i * 2 + 1])), path[i * 2 + 1] - path[i * 2 - 1]);
+    seg.push(l);
+    total += l;
+  }
+  let want = t * total;
+  for (let i = 1; i < n; i++) {
+    const l = seg[i - 1];
+    if (want <= l || i === n - 1) {
+      const f = l > 0 ? Math.min(1, want / l) : 0;
+      let dx = path[i * 2] - path[i * 2 - 2];
+      if (dx > W / 2) dx -= W;
+      if (dx < -W / 2) dx += W;
+      const dy = path[i * 2 + 1] - path[i * 2 - 1];
+      return { x: path[i * 2 - 2] + dx * f, y: path[i * 2 - 1] + dy * f, dx, dy };
+    }
+    want -= l;
+  }
+  return null;
+}
+
+/** Great-circle point between two map positions, and the heading there. */
+function greatCircle(ax: number, ay: number, bx: number, by: number, t: number): { d: [number, number, number]; heading: number } {
+  const dir = (x: number, y: number) => { const lon = lonOfX(x), lat = latOfY(y), c = Math.cos(lat); return [c * Math.cos(lon), Math.sin(lat), c * Math.sin(lon)]; };
+  const A = dir(ax, ay), B = dir(bx, by);
+  const dot = Math.max(-1, Math.min(1, A[0] * B[0] + A[1] * B[1] + A[2] * B[2]));
+  const om = Math.acos(dot);
+  const s = Math.sin(om) || 1;
+  const k1 = Math.sin((1 - t) * om) / s, k2 = Math.sin(t * om) / s;
+  const d: [number, number, number] = [A[0] * k1 + B[0] * k2, A[1] * k1 + B[1] * k2, A[2] * k1 + B[2] * k2];
+  // heading: toward B in the local east/north frame
+  const up = new THREE.Vector3(...d);
+  const north = new THREE.Vector3(0, 1, 0).addScaledVector(up, -up.y).normalize();
+  const east = new THREE.Vector3().crossVectors(up, north);
+  const to = new THREE.Vector3(B[0] - d[0], B[1] - d[1], B[2] - d[2]);
+  return { d, heading: Math.atan2(to.dot(east), to.dot(north)) };
+}
+
+/** Buckets things with a radius into a 3D grid so "what is near this point?" is cheap. */
+class SpatialHash<T> {
+  private m = new Map<string, T[]>();
+  private static EMPTY: never[] = [];
+  constructor(private cell: number) {}
+  private key(x: number, y: number, z: number) {
+    return `${Math.floor(x / this.cell)},${Math.floor(y / this.cell)},${Math.floor(z / this.cell)}`;
+  }
+  add(p: [number, number, number], r: number, v: T) {
+    const c = this.cell;
+    for (let x = Math.floor((p[0] - r) / c); x <= Math.floor((p[0] + r) / c); x++)
+      for (let y = Math.floor((p[1] - r) / c); y <= Math.floor((p[1] + r) / c); y++)
+        for (let z = Math.floor((p[2] - r) / c); z <= Math.floor((p[2] + r) / c); z++) {
+          const k = `${x},${y},${z}`;
+          const l = this.m.get(k);
+          if (l) l.push(v); else this.m.set(k, [v]);
+        }
+  }
+  near(x: number, y: number, z: number): T[] {
+    return this.m.get(this.key(x, y, z)) ?? (SpatialHash.EMPTY as T[]);
+  }
+}
