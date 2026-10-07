@@ -89,6 +89,10 @@ export function findSite(w: World, ox: number, oy: number, radiusKm: number, boa
     if (planet.ocean[i] || planet.lake[i] || planet.elev[i] > 2.8 || planet.tempMean[i] < -6 || planet.freshDist[i] > 1) continue;
     const comp = boat ? w.landCompBoat[i] : w.landComp[i];
     if (comp !== fromComp) continue;
+    // a camp needs enough living land around it to be worth the journey
+    let rich = w.env.forageRate(i);
+    for (let k = 0; k < 8; k++) { const n = NBR8[i * 8 + k]; if (n >= 0 && !planet.ocean[n]) rich += w.env.forageRate(n); }
+    if (rich < 9 * 1.3) continue;
     let crowd = 0;
     let tooClose = false;
     for (const s of living) {
@@ -122,10 +126,10 @@ export function traumatize(w: World, p: Person, kind: 'raid' | 'war' | 'famine' 
 function relate(p: Person, o: Person, delta: number, kind?: 'friend' | 'rival' | 'acquaintance') {
   let r = p.relations.get(o.id);
   if (!r) {
-    if (p.relations.size >= 22) {
-      let wk = -1; let wv = 9;
-      for (const [id, rr] of p.relations) { const v = Math.abs(rr.affinity) + (rr.kind === 'kin' || rr.kind === 'partner' ? 5 : 0); if (v < wv) { wv = v; wk = id; } }
-      if (wk >= 0) p.relations.delete(wk);
+    if (p.relations.size >= 30) {
+      // forget the weakest acquaintances in one sweep (kin and partners are never forgotten)
+      const ranked = [...p.relations].map(([id, rr]) => [id, Math.abs(rr.affinity) + (rr.kind === 'kin' || rr.kind === 'partner' ? 5 : 0)] as [number, number]).sort((x, y) => x[1] - y[1]);
+      for (let i = 0; i < 10; i++) p.relations.delete(ranked[i][0]);
     }
     r = { affinity: 0, kind: kind ?? 'acquaintance' };
     p.relations.set(o.id, r);
@@ -230,7 +234,8 @@ export function personStep(w: World, p: Person, dt: number) {
   const needs = p.needs;
   const needFood = dt * (child ? 0.55 : 1);
   let got = 0;
-  const nearHome = live ? child || (Math.abs(wrapDx(p.x, live.x)) < 5 && Math.abs(p.y - live.y) < 5) : false;
+  const reach = live ? 6 + 0.45 * Math.sqrt(live.pop) + live.stress * 3.5 : 0; // workers return to the common store each day
+  const nearHome = live ? child || (Math.abs(wrapDx(p.x, live.x)) < reach && Math.abs(p.y - live.y) < reach) : false;
   if (nearHome && live && live.food > 0) {
     got = Math.min(needFood * (w.ration.get(live.id) ?? 1), live.food);
     live.food -= got;
@@ -240,8 +245,9 @@ export function personStep(w: World, p: Person, dt: number) {
     p.food -= t;
     got += t;
   }
-  if (got < needFood * 0.5 && !child && !(nearHome && live)) {
-    got += w.env.takeForage(cell, (needFood - got) * 1.4, day) / 1.4;
+  if (got < needFood * 0.9) {
+    // when the common store runs short, everybody (children with their mothers) forages for themselves
+    got += w.env.takeForage(cell, (needFood - got) * 1.3, day) / 1.3;
   }
   if (live) live.consumed += needFood;
   const fed = got / needFood;
@@ -305,8 +311,8 @@ export function personStep(w: World, p: Person, dt: number) {
   // ---- reproduction ----
   if (p.sex === 1) {
     if (p.pregnantUntil >= 0 && day >= p.pregnantUntil) giveBirth(w, p, live);
-    else if (p.partner && p.pregnantUntil < 0 && age >= 16 && age < 43 && p.health > 0.5 && needs[ND.hunger] < 0.5 && (!live || live.stress < 0.45)) {
-      const base = live && live.stage === 'camp' ? 450 : 520;
+    else if (p.partner && p.pregnantUntil < 0 && age >= 16 && age < 43 && p.health > 0.5 && needs[ND.hunger] < 0.5 && (!live || (live.stress < 0.35 && live.food > live.pop * 5))) {
+      const base = (live && live.stage === 'camp' ? 450 : 520) / Math.max(0.3, 1 - (live ? live.stress : 0) * 1.6);
       if (rng.next() < 1 - Math.exp(-dt / base)) {
         const f = w.people.get(p.partner);
         if (f && f.alive) { p.pregnantUntil = day + 270; p.pregnancyFather = f.id; }

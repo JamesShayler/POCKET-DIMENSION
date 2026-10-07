@@ -67,7 +67,7 @@ export function serialize(w: World): string {
     bands: [...w.bands.values()].map((b) => ({ ...b, tech: [...b.tech] })),
     people,
     discovered: [...w.discoveredComps],
-    famineAt: [...w.famineAt], lastMigration: [...w.lastMigration], recentDroughts: w.env.recentDroughts,
+    famineAt: [...w.famineAt], lastMigration: [...w.lastMigration], diseaseAt: [...w.diseaseAt], recentDroughts: w.env.recentDroughts,
     history: { events: w.history.events, nextId: w.history.nextId, counts: w.history.counts },
   };
   return JSON.stringify(data);
@@ -106,7 +106,7 @@ export function deserialize(json: string): World {
     if (p.alive) w.alive.push(p);
   }
   w.discoveredComps = new Set(d.discovered);
-  w.famineAt = new Map(d.famineAt); w.lastMigration = new Map(d.lastMigration); w.env.recentDroughts = d.recentDroughts;
+  w.famineAt = new Map(d.famineAt); w.lastMigration = new Map(d.lastMigration); w.diseaseAt = new Map(d.diseaseAt ?? []); w.env.recentDroughts = d.recentDroughts;
   w.history.events = d.history.events; w.history.nextId = d.history.nextId; w.history.counts = d.history.counts;
   return w;
 }

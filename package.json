@@ -9,7 +9,8 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "preview": "vite preview",
-    "sim": "tsx scripts/headless.ts"
+    "sim": "tsx scripts/headless.ts",
+    "test": "tsx scripts/check.ts"
   },
   "dependencies": {
     "three": "^0.170.0"

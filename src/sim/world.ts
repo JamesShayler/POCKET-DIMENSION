@@ -51,6 +51,7 @@ export class World {
   discoveredComps = new Set<number>();
   famineAt = new Map<number, number>();
   lastMigration = new Map<number, number>();
+  diseaseAt = new Map<number, number>();
   /** Fraction of a full ration each settlement's store can cover this tick (communal sharing). */
   ration = new Map<number, number>();
   /** Simulation counters surfaced on the developer dashboard. */
@@ -197,7 +198,7 @@ export class World {
       id: this.settlements.length + 1,
       name: o.name ?? makeWord(lang.phonology, this.rng, 2 + this.rng.int(2)),
       x: o.x, y: o.y, culture: o.culture, civ: o.civ ?? 0, founded: this.day, founder: o.founder ?? 0, parent: o.parent ?? 0,
-      abandoned: -1, tech: new Set(o.tech), food: 10, goods: 0, housing: 0, nomadic: o.nomadic, permanent: false, stage: 'camp', pop: 0, peak: 0,
+      abandoned: -1, tech: new Set(o.tech), food: 20, goods: 0, housing: 0, nomadic: o.nomadic, permanent: false, stage: 'camp', pop: 0, peak: 0,
       knownKm: 90, stress: 0, stressSeasons: 0, surplus: 0, produced: 0, consumed: 0, drift: 0, langDrift: 0, disease: 0, diseaseUntil: 0,
       leader: 0, defense: 0, cohesion: 0.5, threat: 0, lastRaid: -99999, occupations: {}, originNote: o.note, yearsSettled: 0,
     };
@@ -231,36 +232,39 @@ export class World {
     return n;
   }
 
-  /** Is this region far enough from existing people for a lineage to awaken here independently? */
+  /** Best nearby cell for a founding camp: land, fresh water within reach, fertile. Searches a few regions around. */
+  findAwakenSite(region: number): number {
+    const planet = this.planet;
+    const rx = (region % RW) * RF + RF / 2;
+    const ry = Math.floor(region / RW) * RF + RF / 2;
+    let best = -1;
+    let bs = -Infinity;
+    const R = RF * 2 + 2;
+    for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+      const y = Math.floor(ry) + dy;
+      if (y < 1 || y >= H - 1) continue;
+      const i = idx((((Math.floor(rx) + dx) % W) + W) % W, y);
+      if (planet.ocean[i] || planet.lake[i] || planet.freshDist[i] > 1 || planet.elev[i] > 2.5 || planet.tempMean[i] < -4) continue;
+      let rich = this.env.forageRate(i);
+      for (let k = 0; k < 8; k++) { const n = NBR8[i * 8 + k]; if (n >= 0 && !planet.ocean[n]) rich += this.env.forageRate(n); }
+      const sc = this.env.fert[i] + this.env.veg[i] * 0.5 + rich * 0.02 - Math.hypot(dx, dy) * 0.02;
+      if (rich >= 9 * 1.2 && sc > bs) { bs = sc; best = i; }
+    }
+    return best;
+  }
+
+  /** Is this region far enough from existing people for a lineage to awaken here independently, and is there a viable site? */
   canAwakenAt(r: number): boolean {
     const rx = (r % RW) * RF + RF / 2;
     const ry = Math.floor(r / RW) * RF + RF / 2;
     for (const s of this.settlements) if (s.abandoned < 0 && distKm(s.x, s.y, rx, ry) < 1500) return false;
-    return this.env.regionLand[r] >= 6;
+    return this.env.regionLand[r] >= 6 && this.findAwakenSite(r) >= 0;
   }
 
-  awakenBand(sp: Species, region: number, n: number, traits: Traits) {
+  awakenBand(sp: Species, region: number, n: number, traits: Traits): boolean {
     const rng = this.rng;
-    const planet = this.planet;
-    const cx = (region % RW) * RF;
-    const cy = Math.floor(region / RW) * RF;
-    let best = -1;
-    let bs = -1;
-    for (let dy = -RF; dy < 2 * RF; dy++) for (let dx = -RF; dx < 2 * RF; dx++) {
-      const y = cy + dy;
-      if (y < 0 || y >= H) continue;
-      const i = idx((cx + dx + W) % W, y);
-      if (planet.ocean[i] || planet.lake[i] || planet.freshDist[i] > 1) continue;
-      const sc = this.env.fert[i] + this.env.veg[i] * 0.5 - Math.abs(planet.elev[i]) * 0.1;
-      if (sc > bs) { bs = sc; best = i; }
-    }
-    if (best < 0) {
-      for (let dy = 0; dy < RF; dy++) for (let dx = 0; dx < RF; dx++) {
-        const i = idx((cx + dx) % W, Math.min(H - 1, cy + dy));
-        if (!planet.ocean[i]) { best = i; break; }
-      }
-    }
-    if (best < 0) return;
+    const best = this.findAwakenSite(region);
+    if (best < 0) return false;
     const sx = (best % W) + 0.5;
     const sy = Math.floor(best / W) + 0.5;
     const lang = this.langs.create(rng, this.day);
@@ -300,6 +304,7 @@ export class World {
     s.pop = group.length;
     s.food = group.length * 8;
     s.stage = stageFor(s.pop, true);
+    return true;
   }
 
   bandArrived(b: Band) {

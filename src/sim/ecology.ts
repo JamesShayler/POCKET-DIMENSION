@@ -276,9 +276,9 @@ export class Ecology {
           const loss = preyLoss.get(p) ?? 0;
           p.n = Math.max(0, p.n - Math.min(0.7 * p.n, loss / metab(p.t.size)));
         } else if (sp.diet === 'omni') {
-          const veg = 0.6 * clamp(1 - 0.6 * Lshare) * cf;
+          const veg = 0.7 * clamp(1 - 0.6 * Lshare) * cf;
           const meat = 0.5 * (intake.get(p) ?? 0) * cf;
-          g = rmax * (veg + meat - (0.7 + cost * 0.5));
+          g = rmax * (veg + meat - (0.58 + cost * 0.5));
           const loss = preyLoss.get(p) ?? 0;
           p.n = Math.max(0, p.n - Math.min(0.7 * p.n, loss / metab(p.t.size)));
         } else {
@@ -384,18 +384,65 @@ export class Ecology {
       }
     }
     if (awaken) this.awaken(awaken);
+    else if (!w.awakened && w.day >= this.nextRescueCheck) {
+      this.nextRescueCheck = w.day + 40 * 360;
+      this.rescueLineage();
+    }
+  }
+
+  nextRescueCheck = 150 * 360;
+
+  /**
+   * If every omnivore lineage capable of becoming people has died out before anyone woke, a remnant population
+   * survives in a refuge and re-founds the lineage (logged as a speciation, so the history stays honest).
+   */
+  private rescueLineage() {
+    const w = this.world;
+    const candidates = new Set<number>();
+    for (const p of this.pops.values()) {
+      const sp = this.speciesById(p.sp);
+      if (sp.diet === 'omni' && p.t.intel > 0.3 && p.t.soc > 0.4) candidates.add(sp.id);
+    }
+    if (candidates.size) return;
+    const env = w.env;
+    let best = -1;
+    let bs = -1;
+    for (let r = 0; r < NR; r++) {
+      if (env.regionLand[r] < 10) continue;
+      const v = this.regionVeg(r);
+      const T = env.regionTemp[r];
+      const sc = v * Math.exp(-sq((T - 18) / 9));
+      if (sc > bs) { bs = sc; best = r; }
+    }
+    if (best < 0) return;
+    const T = env.regionTemp[best];
+    const proto = this.createSpecies(null, 'omni', { size: 1.0, speed: 0.5, strength: 0.35, intel: 0.55, eyes: 0.7, hear: 0.5, tol: 14, tempOpt: T, aggr: 0.35, soc: 0.7 });
+    proto.name = 'Proto ' + proto.name;
+    const seen = new Set([best]);
+    const frontier = [best];
+    let placed = 0;
+    while (frontier.length && placed < 9) {
+      const r = frontier.shift()!;
+      if (env.regionLand[r] < 4) continue;
+      this.pops.set(this.key(proto.id, r), { sp: proto.id, r, n: Math.max(8, this.regionVeg(r) * K_PER_VEG * 0.05), t: { ...proto.ref, tempOpt: env.regionTemp[r] } });
+      placed++;
+      for (let k = 0; k < 4; k++) { const nb = this.regionNbr[r * 4 + k]; if (nb >= 0 && !seen.has(nb)) { seen.add(nb); frontier.push(nb); } }
+    }
+    w.history.record('SPECIATION', w.day, `A new social omnivore lineage, ${proto.name}, took hold in a sheltered refuge.`, 1, {
+      x: (best % RW) * RF + RF / 2, y: Math.floor(best / RW) * RF + RF / 2, cause: 'Earlier omnivore lineages had died out; a remnant population in a refuge re-founded the line.',
+    });
   }
 
   private awaken(p: Pop) {
     const w = this.world;
     const sp = this.speciesById(p.sp);
-    sp.sapientAwakenings++;
     const band = Math.round(clamp(p.n * 0.5, 22, 40));
-    // the proto-population in the surrounding area becomes people
+    if (!w.awakenBand(sp, p.r, band, p.t)) return;
+    sp.sapientAwakenings++;
+    // the proto-population in the surrounding area became people
     for (const [key, q] of [...this.pops]) {
       if (q.sp === p.sp && this.regionDist(q.r, p.r) <= 2) this.pops.delete(key);
     }
-    w.awakenBand(sp, p.r, band, p.t);
   }
 
   // ---- queries used by the rest of the world ----

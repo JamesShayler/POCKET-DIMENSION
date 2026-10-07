@@ -179,7 +179,7 @@ export class PlanetView {
         const i = idx(wrapX(cx + dx), y);
         const d = Math.hypot(dx + 0.0, dy + 0.0);
         if (this.politics && !p.ocean[i] && d < rPol) {
-          const a = 0.38 * (1 - d / rPol) + (d > rPol - 1 ? 0.2 : 0);
+          const a = 0.2 * (1 - d / rPol) + (d > rPol - 1 ? 0.14 : 0);
           if (a > this.cellOv[i * 4 + 3]) { this.cellOv[i * 4] = ov[0]; this.cellOv[i * 4 + 1] = ov[1]; this.cellOv[i * 4 + 2] = ov[2]; this.cellOv[i * 4 + 3] = a; }
         }
         if (p.ocean[i]) continue;
@@ -234,7 +234,7 @@ export class PlanetView {
           const orr = (this.cellOv[ia * 4] * wa + this.cellOv[ib * 4] * wb + this.cellOv[ic * 4] * wc + this.cellOv[id * 4] * wd);
           const og = (this.cellOv[ia * 4 + 1] * wa + this.cellOv[ib * 4 + 1] * wb + this.cellOv[ic * 4 + 1] * wc + this.cellOv[id * 4 + 1] * wd);
           const ob = (this.cellOv[ia * 4 + 2] * wa + this.cellOv[ib * 4 + 2] * wb + this.cellOv[ic * 4 + 2] * wc + this.cellOv[id * 4 + 2] * wd);
-          const t = clamp(oa / Math.max(oa, 0.4) * Math.min(1, oa * 2.2));
+          const t = Math.min(0.5, oa * 2.0);
           const nr = orr / Math.max(1e-4, oa), ng = og / Math.max(1e-4, oa), nb = ob / Math.max(1e-4, oa);
           r += (nr - r) * t; g += (ng - g) * t; b += (nb - b) * t;
         }
@@ -270,9 +270,11 @@ export class PlanetView {
 }
 
 function hsl(h: number): RGB {
+  const sat = 0.62, l = 0.52;
   const f = (n: number) => {
     const k = (n + h * 12) % 12;
-    return 0.55 - 0.35 * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    const a = sat * Math.min(l, 1 - l);
+    return l - a * Math.max(-1, Math.min(k - 3, 9 - k, 1));
   };
   return [f(0), f(8), f(4)];
 }

@@ -25,7 +25,7 @@ function adultsOf(w: World, sid: number): Person[] {
 function capacity(w: World, s: Settlement): number {
   const cx = Math.floor(s.x);
   const cy = Math.floor(s.y);
-  const r = has(s, 'agriculture') ? 3 : 2;
+  const r = has(s, 'agriculture') ? 4 : 2;
   let tot = 0;
   for (let dy = -r; dy <= r; dy++) for (let dx = -r; dx <= r; dx++) {
     const y = cy + dy;
@@ -33,7 +33,7 @@ function capacity(w: World, s: Settlement): number {
     const i = idx(wrapX(cx + dx), y);
     if (w.planet.ocean[i]) { tot += 0.3; continue; }
     const fertile = w.env.fert[i] * (0.4 + w.planet.baseVeg[i]);
-    tot += has(s, 'agriculture') ? 9 * fertile + 1.2 : 3.2 * fertile;
+    tot += has(s, 'agriculture') ? 15 * fertile + 1.5 : 3.2 * fertile;
   }
   return tot * (has(s, 'mathematics') ? 1.15 : 1) * (has(s, 'engineering') ? 1.3 : 1);
 }
@@ -157,12 +157,13 @@ function disease(w: World, s: Settlement) {
   s.disease = 0;
   const housing = 20 + s.housing + (has(s, 'architecture') ? 40 : 0);
   const crowding = s.pop / housing;
-  const p = Math.min(0.2, 0.012 * Math.pow(s.pop / 50, 1.4) * (has(s, 'fire') ? 0.7 : 1) * (0.6 + crowding * 0.4));
-  if (s.pop >= 15 && w.rng.next() < p) {
+  const p = Math.min(0.09, 0.004 * Math.pow(s.pop / 50, 1.4) * (has(s, 'fire') ? 0.7 : 1) * (0.6 + crowding * 0.4));
+  if (s.pop >= 15 && day - (w.diseaseAt.get(s.id) ?? -1e9) > 3 * DAYS_PER_YEAR && w.rng.next() < p) {
+    w.diseaseAt.set(s.id, day);
     s.disease = 0.25 + w.rng.next() * 0.5;
     s.diseaseUntil = day + 60 + w.rng.next() * 90;
     const big = s.pop > 60;
-    w.history.record('DISEASE', day, `A sickness swept through ${s.name}.`, big ? 2 : 1, { settlement: s.id, civ: s.civ, x: s.x, y: s.y, cause: `Crowding (${s.pop} people) let an infection spread.` });
+    w.history.record('DISEASE', day, `A sickness swept through ${s.name}.`, s.pop > 150 ? 2 : 1, { settlement: s.id, civ: s.civ, x: s.x, y: s.y, cause: `Crowding (${s.pop} people) let an infection spread.` });
     for (const p2 of adultsOf(w, s.id)) if (w.rng.chance(0.25)) { p2.remember({ day, kind: 'plague', text: `Survived the sickness at ${s.name}`, valence: -0.6, intensity: 0.6, x: s.x, y: s.y }); traumatize(w, p2, 'plague'); }
     // trade contacts carry disease onward
     for (const o of w.activeSettlements()) {
@@ -351,7 +352,7 @@ function nomadMove(w: World, s: Settlement) {
 function migrationCheck(w: World, s: Settlement) {
   if (s.pop < 14) return;
   const cap = capacity(w, s);
-  const over = s.pop > cap * 1.05;
+  const over = s.pop > cap * 1.2;
   const nomadSplit = s.nomadic && s.pop > 48;
   if (!((s.stressSeasons >= 2 && s.stress > 0.45) || over || nomadSplit)) return;
   if (w.day - (w.lastMigration.get(s.id) ?? -1e9) < 1.5 * DAYS_PER_YEAR) return;
@@ -402,7 +403,7 @@ export function startMigration(w: World, s: Settlement, reason: string) {
     note: reason, created: w.day, members: members.map((m) => m.id), stuck: 0, lastRaid: -1e9,
   };
   w.bands.set(band.id, band);
-  const ration = Math.min(8, s.food / Math.max(1, members.length) * 0.5);
+  const ration = Math.min(14, s.food / Math.max(1, members.length) * 0.6);
   for (const m of members) {
     m.band = band.id;
     m.food += ration;
@@ -464,7 +465,7 @@ export function arriveBand(w: World, b: Band) {
   let name: string | undefined;
   if (b.kind === 'migrants') {
     note = `Founded by ${members.length} migrants from ${from?.name ?? 'afar'}: ${b.note}.`;
-    if (from && parentCiv && parentCiv.collapsed < 0 && distKm(from.x, from.y, site.x, site.y) < 450 && parentCiv.culture === b.culture) civId = parentCiv.id;
+    if (from && parentCiv && parentCiv.collapsed < 0 && distKm(from.x, from.y, site.x, site.y) < 450) civId = parentCiv.id;
   } else {
     // outcasts: a new culture shaped by the founder's rejection of the old one
     const oldC = w.cultures.get(b.culture)!;
@@ -534,7 +535,7 @@ function resolveRaid(w: World, b: Band, members: Person[], leader: Person) {
     d.relations.set(leader.id, { affinity: -0.9, kind: 'rival' });
     traumatize(w, d, 'raid', leader.id);
   }
-  w.history.record('BATTLE', w.day, `Raiders led by ${leader.name} ${win ? 'plundered' : 'were driven from'} ${target.name}${killTheirs ? `, killing ${killTheirs}` : ''}.`, win ? 2 : 1, {
+  w.history.record('BATTLE', w.day, `Raiders led by ${leader.name} ${win ? 'plundered' : 'were driven from'} ${target.name}${killTheirs ? `, killing ${killTheirs}` : ''}.`, (win && (killTheirs >= 3 || target.pop > 80)) ? 2 : 1, {
     persons: [leader.id], settlement: target.id, civ: target.civ, x: target.x, y: target.y,
     cause: `Outcasts without land raided a settlement's stores after being cast out of ${w.settlements[b.from - 1]?.name ?? 'society'}.`,
   });
@@ -781,11 +782,14 @@ function evolveGovernment(w: World, civ: Civ, cap: Settlement, v: Float32Array) 
   if (civ.legitimacy < -0.5) options.push(['anarchy', 0.8]);
   let best = civ.government;
   let bs = -1;
-  for (const [g, wt] of options) { const sc = Math.max(0, wt) + w.rng.next() * 0.35; if (sc > bs) { bs = sc; best = g; } }
+  const cur = options.find(([g]) => g === civ.government);
+  const curScore = cur ? Math.max(0, cur[1]) + 0.45 : 0.45;
+  for (const [g, wt] of options) { const sc = Math.max(0, wt) + w.rng.next() * 0.3; if (sc > bs) { bs = sc; best = g; } }
+  if (bs < curScore + 0.3) best = civ.government;
   if (best !== civ.government) {
     const old = civ.government;
     civ.government = best;
-    w.history.record('SUCCESSION', w.day, `The ${civ.name} changed from ${old} to ${best}.`, 2, { civ: civ.id, settlement: cap.id, x: cap.x, y: cap.y, cause: `Internal pressures (population ${pop}, values favouring ${VALUE_KEYS.reduce((a, k, i) => (v[i] > v[VALUE_KEYS.indexOf(a)] ? k : a), VALUE_KEYS[0])}) reshaped how power is held.` });
+    w.history.record('SUCCESSION', w.day, `The ${civ.name} changed from ${old} to ${best}.`, civ.pop > 200 ? 2 : 1, { civ: civ.id, settlement: cap.id, x: cap.x, y: cap.y, cause: `Internal pressures (population ${pop}, values favouring ${VALUE_KEYS.reduce((a, k, i) => (v[i] > v[VALUE_KEYS.indexOf(a)] ? k : a), VALUE_KEYS[0])}) reshaped how power is held.` });
   }
 }
 
