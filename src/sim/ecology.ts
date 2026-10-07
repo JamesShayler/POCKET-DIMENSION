@@ -1,7 +1,7 @@
 import type { World } from './world';
-import { Rng, clamp } from './rng';
+import { Rng, clamp, mix32 } from './rng';
 import { NATURAL_PHONOLOGY, makeWord } from './names';
-import { NR, RW, RH, RF, W, idx, N, regionOfCell } from './grid';
+import { NR, RW, RH, RF, W, H, idx, N, regionOfCell } from './grid';
 import { yearOf } from './time';
 
 export type Diet = 'herb' | 'carn' | 'omni';
@@ -60,11 +60,19 @@ export class Ecology {
   liveSpecies = 0;
   rng: Rng;
   regionNbr: Int32Array;
+  /** land cells of every region (wildlife stands on these) */
+  regionCells: Int32Array[] = [];
   /** Per-region danger to people from predators (0..1), refreshed each season. */
   predRisk = new Float32Array(NR);
 
   constructor(private world: World, rng: Rng) {
     this.rng = rng;
+    const lists: number[][] = Array.from({ length: NR }, () => []);
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = idx(x, y);
+      if (!world.planet.ocean[i] && !world.planet.lake[i]) lists[Math.floor(y / RF) * RW + Math.floor(x / RF)].push(i);
+    }
+    this.regionCells = lists.map((l) => Int32Array.from(l));
     this.regionNbr = new Int32Array(NR * 4).fill(-1);
     for (let r = 0; r < NR; r++) {
       const x = r % RW;
@@ -476,6 +484,36 @@ export class Ecology {
     }
     return take * FOOD_PER_MASS;
   }
+  /** How many individual animals are "visible" for a population (a representative sample of an aggregated herd). */
+  markerCount(pop: Pop): number {
+    return Math.min(14, Math.max(1, Math.ceil(Math.log2(1 + pop.n) * 1.4)));
+  }
+  /** Where the m-th visible animal of a population is at a given time: deterministic, so hunters and the camera agree. */
+  markerPos(pop: Pop, m: number, day: number): { x: number; y: number } | null {
+    const cells = this.regionCells[pop.r];
+    if (!cells.length) return null;
+    const h = mix32(mix32(pop.sp, pop.r), m);
+    const cell = cells[h % cells.length];
+    const wx = ((h >>> 8) % 1000) / 1000;
+    const wy = ((h >>> 18) % 1000) / 1000;
+    const ph = ((h >>> 3) % 628) / 100;
+    return {
+      x: (cell % W) + 0.15 + wx * 0.7 + Math.sin(day * 0.9 + ph) * 0.02,
+      y: Math.floor(cell / W) + 0.15 + wy * 0.7 + Math.cos(day * 0.8 + ph) * 0.02,
+    };
+  }
+  /** A hunter killed one animal of this population. Returns meat in food units, or 0 if the herd is gone. */
+  killAnimal(pop: Pop): number {
+    if (pop.n < 1.5) return 0;
+    pop.n -= 1;
+    return pop.t.size * 12;
+  }
+  popsInRegion(r: number): Pop[] {
+    const out: Pop[] = [];
+    for (const p of this.pops.values()) if (p.r === r) out.push(p);
+    return out;
+  }
+
   totals() {
     let n = 0;
     const live = new Set<number>();

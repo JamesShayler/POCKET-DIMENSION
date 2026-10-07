@@ -6,7 +6,7 @@ import type { Species, Pop } from './ecology';
 import { N, NR } from './grid';
 
 /** Save format: the seed regenerates the planet (terrain, climate, rivers, resources) exactly; only evolving state is stored. */
-export const SAVE_VERSION = 1;
+export const SAVE_VERSION = 2;
 
 const b64 = (a: Float32Array | Float64Array | Uint8Array | Uint16Array): string => {
   const bytes = new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
@@ -28,6 +28,7 @@ interface PersonRec {
   occupation: string; goal: string; goalUntil: number; reputation: number; status: number; food: number; tools: number; goods: number;
   generation: number; alive: boolean; legend: boolean; workCell: number;
   tx: number; ty: number; hasTarget: boolean; stuck: number; px: number; py: number;
+  task: string; phase: number; tcell: number; tslot: number; tb: number; timer: number; cargo: string; cargoAmt: number; back: string; house: number; tongue: number; fluency: [number, number][];
 }
 
 const r3 = (n: number) => Math.round(n * 1000) / 1000;
@@ -44,6 +45,7 @@ export function serialize(w: World): string {
       memories: p.memories, relations: [...p.relations], occupation: p.occupation, goal: p.goal, goalUntil: p.goalUntil, reputation: q(p.reputation), status: q(p.status),
       food: q(p.food), tools: p.tools, goods: p.goods, generation: p.generation, alive: p.alive, legend: p.legend, workCell: p.workCell,
       tx: p.tx, ty: p.ty, hasTarget: p.hasTarget, stuck: p.stuck, px: p.px, py: p.py,
+      task: p.task, phase: p.phase, tcell: p.tcell, tslot: p.tslot, tb: p.tb, timer: p.timer, cargo: p.cargo, cargoAmt: p.cargoAmt, back: p.back, house: p.house, tongue: p.tongue, fluency: [...p.fluency],
     });
   }
   const data = {
@@ -66,6 +68,13 @@ export function serialize(w: World): string {
     civs: w.civs,
     bands: [...w.bands.values()].map((b) => ({ ...b, tech: [...b.tech] })),
     people,
+    flora: { species: w.flora.species, regionSp: b64(new Uint8Array(w.flora.regionSp.buffer)), rng: w.flora.rng.state },
+    buildings: w.buildings.list,
+    resState: [...w.res.state],
+    resKnown: [...w.res.known].map(([k, v]) => [k, [...v]]),
+    diplomacy: [...w.diplomacy.rel.values()],
+    sky: { dustUntil: w.sky.dustUntil, dustStrength: w.sky.dustStrength, struck: w.sky.asteroids.map((a) => a.struck) },
+    tradePairs: [...w.tradePairs], firstFinds: [...w.firstFinds],
     discovered: [...w.discoveredComps],
     famineAt: [...w.famineAt], lastMigration: [...w.lastMigration], diseaseAt: [...w.diseaseAt], recentDroughts: w.env.recentDroughts,
     history: { events: w.history.events, nextId: w.history.nextId, counts: w.history.counts },
@@ -100,12 +109,21 @@ export function deserialize(json: string): World {
     const p = new Person();
     Object.assign(p, r, {
       personality: Float32Array.from(r.personality), needs: Float32Array.from(r.needs), skills: Float32Array.from(r.skills), beliefs: Float32Array.from(r.beliefs),
-      relations: new Map(r.relations),
+      relations: new Map(r.relations), fluency: new Map(r.fluency ?? []),
     });
     w.people.set(p.id, p);
     if (p.alive) w.alive.push(p);
   }
   w.discoveredComps = new Set(d.discovered);
+  w.flora.species = d.flora.species; w.flora.rng = new Rng(d.flora.rng);
+  w.flora.regionSp = new Int16Array(unb64(d.flora.regionSp, Uint8Array).buffer);
+  w.buildings.list = d.buildings; w.buildings.rebuildIndex();
+  w.res.state = new Map(d.resState);
+  w.res.known = new Map((d.resKnown as [number, number[]][]).map(([k, v]) => [k, new Set(v)]));
+  w.diplomacy.rel = new Map((d.diplomacy as any[]).map((r) => [`${r.a}:${r.b}`, r]));
+  w.sky.dustUntil = d.sky.dustUntil; w.sky.dustStrength = d.sky.dustStrength;
+  (d.sky.struck as boolean[]).forEach((st, i) => { if (w.sky.asteroids[i]) w.sky.asteroids[i].struck = st; });
+  w.tradePairs = new Map(d.tradePairs); w.firstFinds = new Set(d.firstFinds);
   w.famineAt = new Map(d.famineAt); w.lastMigration = new Map(d.lastMigration); w.diseaseAt = new Map(d.diseaseAt ?? []); w.env.recentDroughts = d.recentDroughts;
   w.history.events = d.history.events; w.history.nextId = d.history.nextId; w.history.counts = d.history.counts;
   return w;

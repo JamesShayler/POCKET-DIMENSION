@@ -13,15 +13,17 @@ export const NEEDS = ['hunger', 'thirst', 'shelter', 'safety', 'social', 'belong
 export const NN = NEEDS.length;
 export const ND = Object.fromEntries(NEEDS.map((k, i) => [k, i])) as Record<(typeof NEEDS)[number], number>;
 
-export const SKILLS = ['foraging', 'hunting', 'farming', 'crafting', 'building', 'leading', 'exploring', 'healing'] as const;
+export const SKILLS = ['foraging', 'hunting', 'farming', 'crafting', 'building', 'leading', 'exploring', 'healing', 'woodcutting', 'mining'] as const;
 export const NS = SKILLS.length;
 export const SK = Object.fromEntries(SKILLS.map((k, i) => [k, i])) as Record<(typeof SKILLS)[number], number>;
 
+export type TaskKind = '' | 'chop' | 'quarry' | 'mine' | 'clay' | 'berry' | 'fish' | 'hunt' | 'build' | 'field' | 'craft' | 'trade' | 'prospect';
+
 export type Goal =
-  | 'work' | 'drink' | 'eat' | 'socialize' | 'seek mate' | 'explore' | 'migrate' | 'wander' | 'rest' | 'flee' | 'raid' | 'found settlement' | 'follow';
+  | 'work' | 'drink' | 'eat' | 'socialize' | 'seek mate' | 'explore' | 'migrate' | 'wander' | 'rest' | 'flee' | 'raid' | 'found settlement' | 'follow' | 'attack';
 
 export type Occupation =
-  | 'child' | 'forager' | 'hunter' | 'farmer' | 'crafter' | 'builder' | 'healer' | 'leader' | 'warrior' | 'explorer'
+  | 'child' | 'forager' | 'hunter' | 'farmer' | 'woodcutter' | 'miner' | 'trader' | 'crafter' | 'builder' | 'healer' | 'leader' | 'warrior' | 'explorer'
   | 'priest' | 'scholar' | 'hermit' | 'exile' | 'raider' | 'wanderer' | 'cult founder' | 'rebel';
 
 export type MemoryKind =
@@ -90,6 +92,19 @@ export class Person {
   lastDetail = '';
   workCell = -1;
   killed = 0;
+  // physical work: a person is always doing one concrete thing somewhere
+  task: TaskKind = '';
+  phase = 0; // 0 choose, 1 travel out, 2 work, 3 travel back
+  tcell = -1;
+  tslot = -1;
+  tb = 0; // target building or settlement id
+  timer = 0; // hours spent on the current phase
+  cargo = ''; // 'food' | resource key
+  cargoAmt = 0;
+  back = ''; // what a trader brings home
+  house = 0;
+  tongue = 0; // native language id
+  fluency = new Map<number, number>(); // other languages: 0..1
   stuck = 0;
   lastCell = -1;
 

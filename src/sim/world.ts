@@ -12,6 +12,13 @@ import { DAYS_PER_SEASON, DAYS_PER_YEAR, yearOf } from './time';
 import { H, N, NBR8, RF, RW, W, distKm, idx, regionOfCell, NR } from './grid';
 import { makeWord } from './names';
 import { personStep, Band } from './behavior';
+import { Resources } from './resources';
+import { Flora } from './flora';
+import { Buildings, emptyStock, BDEFS, Building } from './buildings';
+import { Diplomacy } from './diplomacy';
+import { Sky } from './sky';
+import { tradeStep as tradeStepImpl } from './economy';
+import type { NodeKind } from './resources';
 import { settlementSeason, civSeason, outcastSeason, arriveBand, bandStuck } from './society';
 
 export const WORLD_VERSION = 1;
@@ -26,6 +33,13 @@ export class World {
   planet: Planet;
   env: Environment;
   eco: Ecology;
+  flora: Flora;
+  res: Resources;
+  buildings: Buildings;
+  diplomacy = new Diplomacy();
+  sky: Sky;
+  /** how many times two settlements have traded, for the emergence of contact languages */
+  tradePairs = new Map<string, number>();
   bus = new EventBus();
   history = new History(this.bus);
   langs = new Languages();
@@ -66,6 +80,10 @@ export class World {
     this.planet = new Planet(this.seed);
     this.env = new Environment(this.planet);
     this.eco = new Ecology(this, Rng.derive(this.seed, 'ecology'));
+    this.flora = new Flora(this, Rng.derive(this.seed, 'flora'));
+    this.res = new Resources(this);
+    this.buildings = new Buildings(this);
+    this.sky = new Sky(this);
     this.computeLandComponents();
   }
 
@@ -76,6 +94,7 @@ export class World {
   /** Create a fresh universe: planet, climate, initial life. Humans are NOT scripted; they must evolve. */
   begin() {
     this.env.updateSeason(this);
+    this.flora.seed();
     this.eco.seedLife();
   }
 
@@ -127,6 +146,7 @@ export class World {
       p.beliefs[k] = clamp(0.5 * inherited + 0.5 * cul.values[k] + rng.gauss() * 0.12);
     }
     p.name = makeWord(lang.phonology, rng, 1 + rng.int(2));
+    p.tongue = opts.mother ? opts.mother.tongue : lang.id;
     if (opts.mother) {
       p.mother = opts.mother.id;
       p.father = opts.father?.id ?? 0;
@@ -198,7 +218,7 @@ export class World {
       id: this.settlements.length + 1,
       name: o.name ?? makeWord(lang.phonology, this.rng, 2 + this.rng.int(2)),
       x: o.x, y: o.y, culture: o.culture, civ: o.civ ?? 0, founded: this.day, founder: o.founder ?? 0, parent: o.parent ?? 0,
-      abandoned: -1, tech: new Set(o.tech), food: 20, goods: 0, housing: 0, nomadic: o.nomadic, permanent: false, stage: 'camp', pop: 0, peak: 0,
+      abandoned: -1, tech: new Set(o.tech), food: 20, goods: 0, housing: 0, res: emptyStock(), need: {}, toolTier: 0, wealth: 0, range: 3, scarce: {}, nomadic: o.nomadic, permanent: false, stage: 'camp', pop: 0, peak: 0,
       knownKm: 90, stress: 0, stressSeasons: 0, surplus: 0, produced: 0, consumed: 0, drift: 0, langDrift: 0, disease: 0, diseaseUntil: 0,
       leader: 0, defense: 0, cohesion: 0.5, threat: 0, lastRaid: -99999, occupations: {}, originNote: o.note, yearsSettled: 0,
     };
@@ -307,6 +327,58 @@ export class World {
     return true;
   }
 
+  buildingDone(b: Building, s: Settlement, by: Person) {
+    const def = BDEFS[b.kind];
+    const cul = this.cultures.get(s.culture);
+    if (cul) this.langs.coin(this.rng, cul.language, b.kind === 'field' ? 'field' : def.cap ? 'house' : b.kind);
+    assignHousesLater(this, s);
+    const notable = ['temple', 'hall', 'market', 'stonehouse', 'smithy', 'tower'].includes(b.kind);
+    if (b.kind === 'field' && !s.nomadic) s.permanent = s.permanent || s.pop >= 18;
+    if (notable && this.buildings.count(s.id, b.kind) === 1) {
+      this.history.record('GROWTH', this.day, `${by.name} and the people of ${s.name} finished their first ${def.name.toLowerCase()}.`, b.kind === 'temple' || b.kind === 'hall' ? 2 : 1, {
+        persons: [by.id], settlement: s.id, civ: s.civ, x: b.x, y: b.y, cause: `${s.name} had the materials (${Object.entries(def.cost).map(([k, v]) => `${v} ${k}`).join(', ')}) and builders with the skill to use them.`,
+      });
+    }
+  }
+  nodeFound(s: Settlement, kind: NodeKind, by: Person) {
+    const cul = this.cultures.get(s.culture);
+    if (cul) this.langs.coin(this.rng, cul.language, kind);
+    const key = `found:${s.civ}:${kind}`;
+    if (!this.firstFinds.has(key)) {
+      this.firstFinds.add(key);
+      this.history.record('DISCOVERY', this.day, `${by.name} of ${s.name} found a deposit of ${kind === 'clay' ? 'good clay' : kind}.`, kind === 'gold' || kind === 'iron' ? 1 : 0, {
+        persons: [by.id], settlement: s.id, civ: s.civ, x: by.x, y: by.y, cause: `Prospectors searched the hills because ${s.name} needed it.`,
+      });
+    }
+  }
+  noteTrade(a: Settlement, b: Settlement, value: number) {
+    const rel = this.diplomacy.get(a.civ, b.civ);
+    rel.trade += value / 80;
+    rel.tension = Math.max(0, rel.tension - 0.01);
+    const k = a.id < b.id ? `${a.id}:${b.id}` : `${b.id}:${a.id}`;
+    const n = (this.tradePairs.get(k) ?? 0) + 1;
+    this.tradePairs.set(k, n);
+    if (n === 1) this.history.record('TRADE', this.day, `${a.name} and ${b.name} traded for the first time.`, 1, { settlement: a.id, civ: a.civ, x: a.x, y: a.y, cause: 'A caravan carried surplus to a neighbour that lacked it.' });
+    const la = this.cultures.get(a.culture)?.language, lb = this.cultures.get(b.culture)?.language;
+    if (n === 14 && la && lb && la !== lb && this.langs.relatedness(la, lb) < 0.7) {
+      const pl = this.langs.create(this.rng, this.day, this.langs.get(la), undefined);
+      const pid = pl.id;
+      pl.pidgin = true;
+      pl.merged = [la, lb];
+      pl.name = `${this.langs.get(la)!.name}-${this.langs.get(lb)!.name} trade tongue`;
+      for (const p of this.alive) if (p.occupation === 'trader' && (p.home === a.id || p.home === b.id)) p.fluency.set(pid, 0.85);
+      this.history.record('LANGUAGE_SPLIT', this.day, `A trade pidgin grew between ${this.langs.get(la)!.name} and ${this.langs.get(lb)!.name} speakers.`, 2, {
+        settlement: a.id, x: a.x, y: a.y, cause: 'Merchants of two peoples needed common words to bargain, and kept the words they shared.',
+      });
+    }
+  }
+  tradeStep(p: Person, s: Settlement, hours: number, fine: boolean): number {
+    return tradeStepImpl(this, p, s, hours, fine);
+  }
+  firstFinds = new Set<string>();
+  /** runtime-only cache of each settlement's current favourite node per resource kind */
+  findCache = new Map<number, { cell: number; slot: number; day: number }>();
+
   bandArrived(b: Band) {
     arriveBand(this, b);
   }
@@ -325,7 +397,10 @@ export class World {
       this.seasonAcc -= DAYS_PER_SEASON;
       this.env.updateSeason(this);
       this.eco.step();
+      this.flora.step();
+      this.sky.step();
       if (this.awakened) {
+        this.diplomacy.season(this);
         settlementSeason(this);
         outcastSeason(this);
         civSeason(this);
@@ -358,6 +433,7 @@ export class World {
       this.day += DAYS_PER_SEASON;
       this.env.updateSeason(this);
       this.eco.step();
+      this.flora.step();
     }
   }
 
@@ -433,3 +509,6 @@ export class World {
 
 export { personStep };
 export type { Band };
+
+import { assignHouses } from './economy';
+function assignHousesLater(w: World, s: Settlement) { assignHouses(w, s); }

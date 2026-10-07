@@ -1,4 +1,6 @@
-import { Rng } from './rng';
+import { Rng, clamp } from './rng';
+import type { World } from './world';
+import type { Person } from './people';
 import { Phonology, makeWord, randomPhonology } from './names';
 
 export type WordOrder = 'SOV' | 'SVO' | 'VSO';
@@ -20,6 +22,9 @@ export interface Language {
   shifts: string[];
   /** Sample lexicon: concept -> word. Diverges as languages split. */
   lexicon: Record<string, string>;
+  /** a contact language between two peoples */
+  pidgin?: boolean;
+  merged?: number[];
 }
 
 const CONCEPTS = ['water', 'fire', 'mother', 'father', 'sun', 'river', 'stone', 'home', 'food', 'child'];
@@ -79,6 +84,53 @@ export class Languages {
   }
   get(id: number): Language | undefined {
     return this.list[id - 1];
+  }
+
+  /** Coin a word for a new concept the first time a people has a use for it. */
+  coin(rng: Rng, langId: number, concept: string): string | null {
+    const l = this.get(langId);
+    if (!l || l.lexicon[concept]) return null;
+    l.lexicon[concept] = makeWord(l.phonology, rng, 1 + rng.int(2));
+    l.vocabulary += 1;
+    return l.lexicon[concept];
+  }
+
+  private root(id: number): number {
+    let l = this.get(id);
+    while (l && l.parent) l = this.get(l.parent);
+    return l?.id ?? id;
+  }
+  /** 1 same language, ~0.7 parent/daughter, ~0.45 sisters, ~0.2 same family, 0 unrelated. */
+  relatedness(a: number, b: number): number {
+    if (a === b) return 1;
+    const A = this.get(a), B = this.get(b);
+    if (!A || !B) return 0;
+    if (A.parent === b || B.parent === a) return 0.7;
+    if (A.parent && A.parent === B.parent) return 0.45;
+    return this.root(a) === this.root(b) ? 0.2 : 0;
+  }
+  /** How well two individuals can understand each other, 0..1 (shared tongue, related tongues, learned fluency, contact pidgins). */
+  understanding(w: World, p: Person, q: Person): number {
+    void w;
+    let u = this.relatedness(p.tongue, q.tongue);
+    u = Math.max(u, p.fluency.get(q.tongue) ?? 0, q.fluency.get(p.tongue) ?? 0);
+    for (const [id, f] of p.fluency) {
+      if (id === q.tongue) continue;
+      const g = q.fluency.get(id);
+      if (g !== undefined) u = Math.max(u, Math.min(f, g));
+    }
+    return clamp(u);
+  }
+  /** Time together teaches each person some of the other's language. */
+  contact(w: World, p: Person, q: Person, amount: number) {
+    void w;
+    if (p.tongue === q.tongue) return;
+    const learn = (a: Person, b: Person) => {
+      const cur = a.fluency.get(b.tongue) ?? 0;
+      if (cur < 1) a.fluency.set(b.tongue, Math.min(1, cur + amount * (0.4 + a.personality[7])));
+    };
+    learn(p, q);
+    learn(q, p);
   }
   /** Text rendering of the language family tree. */
   tree(): string {
