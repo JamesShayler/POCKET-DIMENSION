@@ -264,17 +264,28 @@ function cloudMaterial(f: Fields, altKm: number, layer: number): THREE.ShaderMat
         float dist0 = length(vView);
         float foot = dist0 * uPix; // km per pixel here
         vec3 q = p * ${layer === 0 ? '420.0' : '160.0'} + uWind;
-        float wl = ${layer === 0 ? '15.0' : '39.0'}; // km wavelength of the first octave
+        // one lattice step of the noise, in km (the planet radius over the frequency); an octave needs a few pixels per step
+        float wl = ${layer === 0 ? '1000.0 / 420.0' : '1000.0 / 160.0'};
+        float px = max(foot, 1e-4);
         float n = 0.0, a = 0.5, norm = 0.0;
         vec3 qq = q;
         for (int o = 0; o < 7; o++) {
-          float fade = smoothstep(0.5, 2.0, wl / max(foot, 1e-4));
+          float fade = smoothstep(1.5, 5.0, wl / px);
           n += a * vnoise(qq) * fade + a * 0.5 * (1.0 - fade);
           norm += a;
           qq = qq * 2.0 + vec3(17.0, 31.0, 7.0);
           a *= 0.5; wl *= 0.5;
         }
-        n = n / norm * 0.97 + 0.35 * fbm3(p * ${layer === 0 ? '90.0' : '40.0'} + 5.0) - 0.12 + swirl * 0.35;
+        // larger cloud masses, filtered the same way
+        float wb = ${layer === 0 ? '1000.0 / 90.0' : '1000.0 / 40.0'}, nb = 0.0, ab = 0.5;
+        vec3 qb = p * ${layer === 0 ? '90.0' : '40.0'} + 5.0;
+        for (int o = 0; o < 3; o++) {
+          float fade = smoothstep(1.5, 5.0, wb / px);
+          nb += ab * (vnoise(qb) * fade + 0.5 * (1.0 - fade));
+          qb = qb * 2.0 + vec3(17.0, 31.0, 7.0);
+          ab *= 0.5; wb *= 0.5;
+        }
+        n = n / norm * 0.97 + 0.35 * nb - 0.12 + swirl * 0.35;
         float thr = 1.0 - cover * 0.95 - swirl * 0.4;
         float dens = smoothstep(thr, thr + ${layer === 0 ? '0.18' : '0.35'}, n) * ${layer === 0 ? '0.97' : '0.55'};
         if (dens < 0.004) discard;
@@ -289,7 +300,9 @@ function cloudMaterial(f: Fields, altKm: number, layer: number): THREE.ShaderMat
         vec3 col = lit * shade * day + vec3(0.02, 0.025, 0.04) * (1.0 - day) + vec3(0.7, 0.75, 0.9) * uFlash * 0.6;
         float dist = length(vView);
         col = haze(col, dist, uCamH, ${altKm.toFixed(1)}, d, normalize(vView), L);
-        gl_FragColor = vec4(col, dens * (1.0 - smoothstep(600.0, 3000.0, dist) * 0.2));
+        // seen edge-on the deck aliases into noise: thin it out at grazing angles
+        float graze = smoothstep(0.015, 0.12, abs(dot(normalize(vView), d)));
+        gl_FragColor = vec4(col, dens * graze * (1.0 - smoothstep(600.0, 3000.0, dist) * 0.2));
         #include <tonemapping_fragment>
         #include <colorspace_fragment>
       }`,

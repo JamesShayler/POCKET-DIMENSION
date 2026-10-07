@@ -214,7 +214,8 @@ function techSeason(w: World, s: Settlement) {
   for (const id of TECH_IDS) {
     if (s.tech.has(id)) continue;
     const t = TECHS[id];
-    if (s.pop < t.minPop || (t.civPop && civPop < t.civPop)) continue;
+    // an idea needs a big enough town, or a people large enough to keep it alive between its villages
+    if ((s.pop < t.minPop && (s.pop < t.minPop * 0.35 || civPop < t.minPop * 2.5)) || (t.civPop && civPop < t.civPop)) continue;
     if (!t.prereq.every((q) => s.tech.has(q))) continue;
     let ok = true;
     if (t.needs) for (const k of Object.keys(t.needs) as (keyof typeof res)[]) if (res[k] < (t.needs[k] ?? 0)) ok = false;

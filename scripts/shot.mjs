@@ -46,4 +46,4 @@ await shoot('g-solar', aim, 10000, [9e8, 0, 0.4]);
 await shoot('h-person', () => { const { client, ui, view } = window.pd; view.rig.alt = 0.05; const P = client.people; if (P.n) ui.select('person', P.id[0], true); view.rig.alt = 0.03; view.rig.pitch = 1.2; }, 14000);
 await shoot('i-almanac', () => { const { ui } = window.pd; ui.clearSelection(); ui.openAlmanac('languages'); }, 3000);
 await browser.close();
-process.kill(-vite.pid);
+try { process.kill(-vite.pid); } catch { /* already gone */ }

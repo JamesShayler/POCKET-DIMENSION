@@ -296,7 +296,8 @@ export class TerrainGen {
     let anyWater = false;
     for (let b = 1; b <= SEG + 1 && !anyWater; b++) for (let a = 1; a <= SEG + 1; a++) if (!isNaN(Wt[b * G + a])) { anyWater = true; break; }
     if (anyWater) {
-      const wpos = new Float32Array(V * V * 3), wdepth = new Float32Array(V * V), wdir = new Float32Array(V * V * 3);
+      const wnv = V * V + skirt;
+      const wpos = new Float32Array(wnv * 3), wdepth = new Float32Array(wnv), wdir = new Float32Array(wnv * 3);
       for (let b = 0; b < V; b++) for (let a = 0; a < V; a++) {
         const k = (b + 1) * G + (a + 1);
         const v = b * V + a;
@@ -316,6 +317,23 @@ export class TerrainGen {
       for (let b = 0; b < SEG; b++) for (let a = 0; a < SEG; a++) {
         const v0 = b * V + a, v1 = v0 + 1, v2 = v0 + V, v3 = v2 + 1;
         if (wdepth[v0] > 0 || wdepth[v1] > 0 || wdepth[v2] > 0 || wdepth[v3] > 0) widx.push(v0, v1, v2, v1, v3, v2);
+      }
+      // the water needs skirts too, or the seams between tiles of different detail sparkle
+      let wsv = V * V;
+      for (let k = 0; k < 4; k++) {
+        const e = edge(k);
+        const start = wsv;
+        for (const v of e) {
+          const dx = wdir[v * 3], dy = wdir[v * 3 + 1], dz = wdir[v * 3 + 2];
+          wpos[wsv * 3] = wpos[v * 3] - dx * drop; wpos[wsv * 3 + 1] = wpos[v * 3 + 1] - dy * drop; wpos[wsv * 3 + 2] = wpos[v * 3 + 2] - dz * drop;
+          wdir[wsv * 3] = dx; wdir[wsv * 3 + 1] = dy; wdir[wsv * 3 + 2] = dz;
+          wdepth[wsv] = wdepth[v];
+          wsv++;
+        }
+        for (let q = 0; q < V - 1; q++) {
+          const a0 = e[q], a1 = e[q + 1], b0 = start + q, b1 = start + q + 1;
+          if (wdepth[a0] > 0 || wdepth[a1] > 0) widx.push(a0, b0, a1, a1, b0, b1);
+        }
       }
       if (widx.length) res.water = { pos: wpos, depth: wdepth, dir: wdir, index: Uint32Array.from(widx) };
     }

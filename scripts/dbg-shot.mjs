@@ -10,10 +10,11 @@ await page.goto('http://localhost:5188/#seed=pocket&autostart');
 await page.waitForFunction(() => window.pd && document.getElementById('loading').style.display === 'none', null, { timeout: 400000 });
 const steps = JSON.parse(process.argv[2]);
 for (const [name, code, wait] of steps) {
+  if (name.startsWith('log')) { await page.waitForTimeout(wait); console.log(name, JSON.stringify(await page.evaluate(code))); continue; }
   await page.evaluate(code);
   await page.waitForTimeout(wait);
-  await page.screenshot({ path: `/tmp/claude-0/shots/dbg-${name}.png` });
+  await page.screenshot({ path: `/tmp/claude-0/shots/dbg-${name}.png`, timeout: 240000 });
   console.log('shot', name);
 }
 await browser.close();
-process.kill(-vite.pid);
+try { process.kill(-vite.pid); } catch { /* already gone */ }

@@ -31,6 +31,8 @@ interface Node {
   trees?: Float32Array;
   pending: boolean;
   used: number;
+  /** distance / size when last wanted: lower is more urgent */
+  prio: number;
   minH: number;
   maxH: number;
 }
@@ -79,7 +81,7 @@ export class Terrain {
     const k = 1 << level;
     n = {
       key, face, level, i, j, dir: faceDir(face, -1 + (2 * (i + 0.5)) / k, -1 + (2 * (j + 0.5)) / k), sizeKm: ((Math.PI / 2) * R_KM) / k,
-      pending: false, used: 0, minH: 0, maxH: 0,
+      pending: false, used: 0, minH: 0, maxH: 0, prio: 1e9,
     };
     this.all.set(key, n);
     return n;
@@ -95,11 +97,11 @@ export class Terrain {
     if (!this.queue.length) return;
     for (let k = 0; k < this.workers.length; k++) {
       while (this.busy[k] < 2 && this.queue.length) {
-        // nearest (most recently wanted, coarsest first) jobs first
+        // the most urgent job first: wanted this frame, and largest on screen (distance / size)
         let bi = 0;
         for (let q = 1; q < this.queue.length; q++) {
           const a = this.queue[q], b = this.queue[bi];
-          if (a.used > b.used || (a.used === b.used && a.level < b.level)) bi = q;
+          if (a.used > b.used + 2 || (Math.abs(a.used - b.used) <= 2 && a.prio < b.prio)) bi = q;
         }
         const n = this.queue.splice(bi, 1)[0];
         if (this.frame - n.used > 30) { n.pending = false; continue; }
@@ -157,6 +159,7 @@ export class Terrain {
     for (const n of this.drawn) { if (n.mesh) n.mesh.visible = false; if (n.water) n.water.visible = false; }
     this.drawn = [];
     const camR = Math.hypot(cam[0], cam[1], cam[2]);
+    const camAlt = camR - R_KM;
     const camDir: [number, number, number] = [cam[0] / camR, cam[1] / camR, cam[2] / camR];
     const horizon = Math.acos(Math.min(1, (R_KM - 8) / Math.max(R_KM, camR)));
     const visit = (n: Node): boolean => {
@@ -167,14 +170,16 @@ export class Terrain {
       const ch = n.mesh ? (n.minH + n.maxH) / 2 : 0;
       const cx = n.dir[0] * (R_KM + ch) - cam[0], cy = n.dir[1] * (R_KM + ch) - cam[1], cz = n.dir[2] * (R_KM + ch) - cam[2];
       const d = Math.hypot(cx, cy, cz);
-      const split = n.level < MAX_LEVEL && d < n.sizeKm * SPLIT;
+      // coarse tiles (seen from orbit) refine sooner, so coasts stay within a pixel or two
+      const split = n.level < MAX_LEVEL && d < n.sizeKm * (n.level <= 5 && camAlt > 300 ? 7 : SPLIT);
+      n.prio = d / n.sizeKm;
       if (split) {
         if (!n.children) {
           const l = n.level + 1;
           n.children = [this.node(n.face, l, n.i * 2, n.j * 2), this.node(n.face, l, n.i * 2 + 1, n.j * 2), this.node(n.face, l, n.i * 2, n.j * 2 + 1), this.node(n.face, l, n.i * 2 + 1, n.j * 2 + 1)];
         }
         let ready = true;
-        for (const k of n.children) { k.used = this.frame; if (!k.mesh) { ready = false; this.request(k); } }
+        for (const k of n.children) { k.used = this.frame; k.prio = n.prio * 2; if (!k.mesh) { ready = false; this.request(k); } }
         if (ready) {
           for (const k of n.children) visit(k);
           return true;
@@ -340,13 +345,16 @@ function terrainMaterial(f: Fields): THREE.ShaderMaterial {
         N = normalize(N + (rnd - d * dot(rnd, d)) * 0.5 * vnear + (vec3(n2, n1, n2) - 0.5 - d * dot(vec3(n2, n1, n2) - 0.5, d)) * 0.25 * near);
         // bare rock on steep and high ground; sand and shingle at the shore
         vec3 rockC = mix(vec3(0.42, 0.40, 0.37), vec3(0.55, 0.52, 0.47), fbm3(lp * 6.0));
-        float rock = smoothstep(0.16, 0.42, slope + (dn - 0.5) * 0.12) + smoothstep(-1.0, -7.0, T) * 0.6 * (1.0 - land.a * 0.5);
+        // peaks standing well above their cell's mean height: colder, by the lapse rate, than the air the simulation tracks
+        float above = smoothstep(0.1, 0.5, h - cellE);
+        float rock = smoothstep(0.16, 0.42, slope + (dn - 0.5) * 0.12) + smoothstep(-1.0, -7.0, T) * 0.6 * above * (1.0 - land.a * 0.5);
         alb = mix(alb, rockC, clamp(rock, 0.0, 1.0));
         float shore = (1.0 - smoothstep(0.0012, 0.0045 + dn * 0.002, h)) * (clim.b > 0.5 || h < 0.003 ? 1.0 : 0.0);
         alb = mix(alb, vec3(0.76, 0.69, 0.52), shore * 0.85);
-        // snow: the simulated snowpack, plus cold ground above the local snow line; it slides off cliffs
-        float snowField = smoothstep(0.25, 0.75, aux.r + (fbm3(d * 400.0) - 0.5) * 0.6);
-        float snow = max(snowField, smoothstep(-0.5, -5.0, T + (dn - 0.5) * 3.0)) * (1.0 - smoothstep(0.35, 0.62, slope));
+        // snow: the simulated snowpack (thinning out on warmer low ground), plus high ground above the present snow line;
+        // it slides off cliffs. T is this week's air temperature carried to this height at 6.5 °C per km.
+        float snowField = smoothstep(0.25, 0.75, aux.r + (fbm3(d * 400.0) - 0.5) * 0.6) * (1.0 - smoothstep(2.0, 8.0, T));
+        float snow = max(snowField, smoothstep(-0.5, -5.0, T + (dn - 0.5) * 3.0) * above) * (1.0 - smoothstep(0.35, 0.62, slope));
         alb = mix(alb, vec3(0.93, 0.95, 0.98), clamp(snow, 0.0, 1.0));
         // towns: paved ground, roofs and, at night, street light
         float lightAmt = 0.0;
@@ -432,19 +440,27 @@ function waterMaterial(f: Fields): THREE.ShaderMaterial {
         vec3 lp = uDetailOff + vLocal;
         float t = uTime;
         float rough = 0.35 + clamp(wind / 12.0, 0.0, 1.0) + wx.g * 0.02;
+        vec3 q0 = lp * 8.0 + vec3(t * 0.05, 0.0, t * 0.03);
         vec3 q1 = lp * 90.0 + vec3(t * 0.9 + cur.x * t * 3.0, t * 0.3, cur.y * t * 3.0);
         vec3 q2 = lp * 420.0 + vec3(-t * 1.7, t * 1.1, t * 0.6);
         float nearW = 1.0 - smoothstep(0.3, 12.0, dist);
-        vec3 grad = vec3(vnoise(q1 + vec3(0.13, 0.0, 0.0)) - vnoise(q1), vnoise(q1 + vec3(0.0, 0.13, 0.0)) - vnoise(q1), vnoise(q1 + vec3(0.0, 0.0, 0.13)) - vnoise(q1)) * 2.2
-                  + (vec3(vnoise(q2 + vec3(0.1, 0.0, 0.0)), vnoise(q2 + vec3(0.0, 0.1, 0.0)), vnoise(q2 + vec3(0.0, 0.0, 0.1))) - vnoise(q2)) * 1.4 * nearW;
+        // each wave octave fades out once its lattice (125 m, 11 m, 2.4 m) is smaller than a few pixels
+        float foot = max(length(fwidth(vLocal)), 1e-7);
+        float f0 = 1.0 - smoothstep(0.03, 0.12, foot), f1 = 1.0 - smoothstep(0.003, 0.012, foot), f2 = 1.0 - smoothstep(0.0006, 0.0025, foot);
+        float v0 = vnoise(q0), v1 = vnoise(q1), v2 = vnoise(q2);
+        vec3 grad = (vec3(vnoise(q0 + vec3(0.13, 0.0, 0.0)), vnoise(q0 + vec3(0.0, 0.13, 0.0)), vnoise(q0 + vec3(0.0, 0.0, 0.13))) - v0) * 1.2 * f0
+                  + (vec3(vnoise(q1 + vec3(0.13, 0.0, 0.0)), vnoise(q1 + vec3(0.0, 0.13, 0.0)), vnoise(q1 + vec3(0.0, 0.0, 0.13))) - v1) * 2.2 * f1
+                  + (vec3(vnoise(q2 + vec3(0.1, 0.0, 0.0)), vnoise(q2 + vec3(0.0, 0.1, 0.0)), vnoise(q2 + vec3(0.0, 0.0, 0.1))) - v2) * 1.4 * f2;
         vec3 N = normalize(d + (grad - d * dot(grad, d)) * 0.35 * rough);
+        // waves too small to resolve still roughen the surface: the sun's glint spreads out instead of sparkling
+        float unres = 1.0 - f1;
         // ocean-scale current streaks seen from altitude
         float streak = smoothstep(0.55, 0.8, fbm3(d * 260.0 + vec3(cur * t * 0.002, 0.0))) * length(cur) * 2.0 * (1.0 - nearW);
         vec3 L = normalize(uSun);
         float sunUp = dot(d, L);
         float day = smoothstep(-0.1, 0.15, sunUp);
         float deep = 1.0 - exp(-vDepth / 0.025);
-        vec3 shallow = vec3(0.07, 0.36, 0.38), abyss = vec3(0.008, 0.04, 0.1);
+        vec3 shallow = vec3(0.07, 0.36, 0.38), abyss = vec3(0.03, 0.11, 0.24);
         vec3 body = pow(mix(shallow, abyss, deep) * (1.0 + streak * 0.6), vec3(2.2));
         // sea ice where the water freezes
         float floes = fbm3(d * 240.0) + (fbm3(lp * 3.0) - 0.5) * 0.4 * nearW;
@@ -452,7 +468,8 @@ function waterMaterial(f: Fields): THREE.ShaderMaterial {
         vec3 skyC = mix(vec3(0.02, 0.03, 0.06), mix(vec3(0.85, 0.5, 0.3), vec3(0.45, 0.62, 0.9), smoothstep(0.0, 0.3, sunUp)), day);
         float fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
         vec3 R = reflect(-V, N);
-        float spec = pow(max(dot(R, L), 0.0), 220.0) * 6.0 * smoothstep(-0.02, 0.05, sunUp) * (1.0 - ice);
+        float shin = mix(220.0, mix(60.0, 18.0, clamp(rough - 0.35, 0.0, 1.0)), unres);
+        float spec = pow(max(dot(R, L), 0.0), shin) * 6.0 * (shin / 220.0) * smoothstep(-0.02, 0.05, sunUp) * (1.0 - ice);
         float ndl = max(dot(N, L), 0.0) * smoothstep(-0.03, 0.06, sunUp);
         vec3 sunCol = mix(vec3(1.0, 0.5, 0.25), vec3(1.0, 0.96, 0.9), smoothstep(0.0, 0.3, sunUp)) * uDust;
         vec3 col = body * (ndl * sunCol * 0.6 + day * 0.25 + 0.02) + skyC * fres * 0.9 + sunCol * spec;

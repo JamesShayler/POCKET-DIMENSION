@@ -80,9 +80,10 @@ vec3 haze(vec3 col, float dist, float camH, float fragH, vec3 up, vec3 viewDir, 
   float sunUp = dot(up, sunDir);
   float day = smoothstep(-0.12, 0.25, sunUp);
   float mu = dot(viewDir, sunDir);
-  vec3 skyCol = mix(vec3(0.78, 0.2, 0.05), vec3(0.12, 0.3, 0.85), smoothstep(0.0, 0.35, sunUp)) * day;
+  // far enough away, the ground fades into the colour of the horizon sky: pale blue by day, orange low in the sun
+  vec3 skyCol = mix(vec3(0.85, 0.32, 0.1), vec3(0.4, 0.56, 0.88), smoothstep(0.0, 0.35, sunUp)) * day;
   skyCol += vec3(1.0, 0.85, 0.6) * pow(max(mu, 0.0), 8.0) * 0.6 * day;
-  return col * ext + skyCol * (1.0 - ext) * 0.9 + vec3(0.004, 0.006, 0.012) * (1.0 - ext) * (1.0 - day);
+  return col * ext + skyCol * (1.0 - ext) * 0.5 + vec3(0.002, 0.003, 0.006) * (1.0 - ext) * (1.0 - day);
 }
 `;
 

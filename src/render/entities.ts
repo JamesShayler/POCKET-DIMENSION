@@ -464,10 +464,8 @@ export class Entities {
           if (nr < 30000) { const s = hgt; this.rocks.setMatrixAt(nr, this.place(q, hv * 6.28, crown, s, crown)); this.rocks.setColorAt(nr, tmpC.setHex(0x8a857c)); nr++; }
           continue;
         }
-        // is the forest still standing here?
-        const base = c.planet.baseVeg[cell] + 0.05;
-        const veg = env ? env.veg[cell] / 255 : base;
-        if (hv > Math.min(1, (veg / base) * 1.15)) continue;
+        // is the forest still standing here? (trees outlast winter; farmland and felled groves do not keep them)
+        if (env && env.cultivated[cell] && ((hv * 5.3) % 1) > 0.25) continue;
         let skip = false;
         for (const g of clearHash.near(px, py, pz)) { if (Math.hypot(g.p[0] - px, g.p[1] - py, g.p[2] - pz) < g.r) { skip = true; break; } }
         if (skip) continue;

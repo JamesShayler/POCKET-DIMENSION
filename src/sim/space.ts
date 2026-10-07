@@ -172,7 +172,7 @@ export class Space {
       if (!pad) continue;
       const prog = this.program(civ.id);
       const crewedAge = pad.tech.has('spaceflight');
-      const rate = (crewedAge ? 0.9 : 0.35) * clamp(civ.pop / 3000, 0.3, 2);
+      const rate = (crewedAge ? 0.9 : 0.35) * clamp(civ.pop / 600, 0.3, 2);
       if (rng.next() > 1 - Math.exp(-rate)) continue;
       prog.launches++;
       const failRate = Math.max(0.03, 0.35 - prog.launches * 0.02);
@@ -274,7 +274,7 @@ export class Space {
     const d = distKm(a.x, a.y, b.x, b.y);
     if (d > 120 && w.buildings.count(a.id, 'airport') && w.buildings.count(b.id, 'airport') && !key('air')) {
       const path = [a.x, a.y, b.x, b.y];
-      this.routes.push({ id: this.next++, kind: 'air', a: a.id, b: b.id, civ: a.civ, since: w.day, path, km: d, fleet: 1 + Math.floor(Math.min(a.pop, b.pop) / 1500) });
+      this.routes.push({ id: this.next++, kind: 'air', a: a.id, b: b.id, civ: a.civ, since: w.day, path, km: d, fleet: 1 + Math.floor(Math.min(a.pop, b.pop) / 300) });
       w.history.record('TRADE', w.day, `The first scheduled flights linked ${a.name} and ${b.name}.`, 1, { settlement: a.id, x: a.x, y: a.y, cause: `Both cities had airports and a trade worth flying for (${Math.round(d)} km).` });
     }
     if (d > 40 && w.buildings.count(a.id, 'dock') && w.buildings.count(b.id, 'dock') && !key('sea') && this.routes.filter((r) => r.kind === 'sea').length < 400) {

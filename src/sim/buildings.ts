@@ -76,6 +76,8 @@ export class Buildings {
   /** per settlement: its buildings (a cached array, never copy it in hot paths) */
   bySettlement = new Map<number, Building[]>();
   private static EMPTY: Building[] = [];
+  /** shoreline points around a town, a pure function of its position (so caching it never changes the history) */
+  private shoreMemo = new Map<string, { x: number; y: number }[]>();
 
   constructor(private world: World) {}
 
@@ -107,8 +109,19 @@ export class Buildings {
     const isField = kind === 'field';
     const n = mine.length;
     if (RINGS.includes(kind)) return { x: s.x, y: s.y };
-    const far = kind === 'factory' || kind === 'powerplant' ? [0.5, 1.6] : kind === 'airport' ? [2.5, 4] : kind === 'launchpad' ? [5, 9] : kind === 'dock' ? [0.05, 4] : null;
-    for (let attempt = 0; attempt < (kind === 'dock' ? 120 : 30); attempt++) {
+    if (kind === 'dock') {
+      // a dock stands on the town's own shore, just inland of the waterline
+      const pts = this.shore(s);
+      const k0 = rng.int(Math.max(1, pts.length));
+      for (let q = 0; q < pts.length; q++) {
+        const c = pts[(k0 + q) % pts.length];
+        if (mine.some((b) => Math.hypot(wrapDx(c.x, b.x) * kmPerCellX(c.y), (c.y - b.y) * KM_PER_CELL_Y) < (def.size + BDEFS[b.kind].size) * 1.15 + 0.004)) continue;
+        return { x: ((c.x % W) + W) % W, y: c.y };
+      }
+      return null;
+    }
+    const far = kind === 'factory' || kind === 'powerplant' ? [0.5, 1.6] : kind === 'airport' ? [2.5, 4] : kind === 'launchpad' ? [5, 9] : null;
+    for (let attempt = 0; attempt < 30; attempt++) {
       // radial density falls off from the centre; civic buildings stay central
       const civic = kind === 'hall' || kind === 'market' || kind === 'temple' || kind === 'well';
       const rKm = far ? far[0] + rng.next() * (far[1] - far[0]) : isField ? 0.35 + Math.sqrt(rng.next()) * (0.8 + Math.sqrt(s.pop) * 0.08 + n * 0.004) : civic ? 0.03 + rng.next() * 0.12 : 0.03 + Math.sqrt(rng.next()) * (0.06 + Math.sqrt(n + 3) * 0.042);
@@ -119,11 +132,6 @@ export class Buildings {
       const xi = wrapX(Math.floor(x));
       const cell = idx(xi, Math.floor(y));
       if (p.ocean[cell] || p.elev[cell] > 3.2 || !p.isLand(x, y, 0.004)) continue;
-      if (kind === 'dock') {
-        // a dock stands on the shore: land here, water a few dozen metres further out
-        const ox = x + (Math.cos(ang) * 0.06) / kmPerCellX(y), oy = y + (Math.sin(ang) * 0.06) / KM_PER_CELL_Y;
-        if (p.isLand(ox, oy, 0.0)) continue;
-      }
       let ok = true;
       for (const b of mine) {
         const kx = kmPerCellX(y);
@@ -135,6 +143,39 @@ export class Buildings {
       return { x: ((x % W) + W) % W, y };
     }
     return null;
+  }
+
+  /** Where the water begins around a town: along 24 bearings, the first sea or lake within 14 km, found to a few metres. */
+  private shore(s: Settlement): { x: number; y: number }[] {
+    const key = `${s.id}:${s.x}:${s.y}`;
+    const hit = this.shoreMemo.get(key);
+    if (hit) return hit;
+    const p = this.world.planet;
+    const at = (ca: number, sa: number, r: number) => {
+      const y = s.y + (sa * r) / KM_PER_CELL_Y;
+      return { x: s.x + (ca * r) / kmPerCellX(y), y };
+    };
+    const out: { x: number; y: number }[] = [];
+    for (let k = 0; k < 24; k++) {
+      const ang = (k / 24) * Math.PI * 2 + 0.1;
+      const ca = Math.cos(ang), sa = Math.sin(ang);
+      let lo = 0, hi = -1;
+      for (let r = 0.25; r <= 14; r += 0.25) {
+        const q = at(ca, sa, r);
+        if (q.y < 0.2 || q.y > H - 0.2) break;
+        if (!p.isLand(q.x, q.y, 0.0)) { hi = r; break; }
+        lo = r;
+      }
+      if (hi < 0) continue;
+      for (let it = 0; it < 6; it++) {
+        const m = (lo + hi) / 2, q = at(ca, sa, m);
+        if (p.isLand(q.x, q.y, 0.0)) lo = m; else hi = m;
+      }
+      const q = at(ca, sa, Math.max(0.03, lo - 0.012));
+      if (p.isLand(q.x, q.y, 0.0)) out.push(q);
+    }
+    this.shoreMemo.set(key, out);
+    return out;
   }
 
   start(s: Settlement, kind: BKind, spend = true): Building | null {

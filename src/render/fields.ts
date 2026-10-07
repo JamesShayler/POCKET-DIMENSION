@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { SimClient } from '../client';
 import { Biome } from '../sim/planet';
-import { H, N, W, cellLat } from '../sim/grid';
+import { H, N, W, cellLat, idx } from '../sim/grid';
 import { seasonPhase } from '../sim/time';
 import { WH, WW } from '../sim/weather';
 
@@ -21,8 +21,8 @@ const LAND: Record<number, [RGB, RGB]> = {
   [Biome.Tundra]: [hex(0x7f7a68), hex(0x6a7a55)],
   [Biome.Taiga]: [hex(0x4f5a43), hex(0x24402b)],
   [Biome.TemperateForest]: [hex(0x5f6e40), hex(0x29552a)],
-  [Biome.Grassland]: [hex(0x9c9150), hex(0x5f8a36)],
-  [Biome.Savanna]: [hex(0xab9150), hex(0x86903c)],
+  [Biome.Grassland]: [hex(0x948a5a), hex(0x5f8a36)],
+  [Biome.Savanna]: [hex(0xa48c58), hex(0x84893f)],
   [Biome.Desert]: [hex(0xcfac74), hex(0xc0a05c)],
   [Biome.Rainforest]: [hex(0x2b5f2f), hex(0x123f22)],
   [Biome.Swamp]: [hex(0x4a634a), hex(0x2f4d37)],
@@ -61,12 +61,30 @@ export class Fields {
   private lastWx = -1;
   private lastSet = -1;
   private lastDay = -1e9;
+  private lastWall = -1e9;
+  /** Ground-level air temperature per cell, eased over about a week so snow lines and frost don't flicker with every front. */
+  private airT = new Float32Array(N);
+  private airDay = -1;
+  private wElev = new Float32Array(WW * WH);
 
-  constructor(private c: SimClient) {}
+  constructor(private c: SimClient) {
+    // the weather grid holds air temperature at each coarse cell's mean land height (as the simulation computes it)
+    const p = c.planet;
+    for (let y = 0; y < WH; y++) for (let x = 0; x < WW; x++) {
+      let land = 0, e = 0;
+      for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+        const i = idx(x * 2 + dx, y * 2 + dy);
+        if (!p.ocean[i]) { land++; e += Math.max(0, p.elev[i]); }
+      }
+      this.wElev[y * WW + x] = land ? e / land : 0;
+    }
+  }
 
   update(day: number) {
     const c = this.c;
-    if (c.versions.env !== this.lastEnv || Math.abs(day - this.lastDay) > 6) {
+    const now = performance.now();
+    if ((c.versions.env !== this.lastEnv || Math.abs(day - this.lastDay) > 6) && now - this.lastWall > 400) {
+      this.lastWall = now;
       this.lastEnv = c.versions.env;
       this.lastDay = day;
       this.landColors(day);
@@ -115,7 +133,7 @@ export class Fields {
         aux[i * 4 + 1] = burn >= 128 ? 255 : 0;
         aux[i * 4 + 2] = env ? env.soil[i] : 128;
         aux[i * 4 + 3] = Math.round(scar * 255);
-        const T = p.tempMean[i] + p.tempAmp[i] * phase * sign * latK;
+        const T = this.airDay >= 0 ? this.airT[i] : p.tempMean[i] + p.tempAmp[i] * phase * sign * latK;
         clim[i * 4] = Math.max(0, Math.min(255, Math.round((T + 50) * 2)));
         clim[i * 4 + 1] = Math.max(0, Math.min(255, Math.round(Math.max(0, p.elev[i]) * 30)));
         clim[i * 4 + 2] = p.ocean[i] ? 255 : 0;
@@ -167,6 +185,35 @@ export class Fields {
     }
     this.weather.needsUpdate = true;
     this.ocean.needsUpdate = true;
+    this.airTemperature(w.day);
+  }
+
+  /** Air temperature at each cell's own height (bilinear from the weather grid, 6.5 °C per km), eased toward the present. */
+  private airTemperature(day: number) {
+    const w = this.c.weather!;
+    const p = this.c.planet;
+    const k = this.airDay < 0 ? 1 : 1 - Math.exp(-Math.max(0, day - this.airDay) / 8);
+    if (this.airDay >= 0 && k < 1e-4) return;
+    this.airDay = day;
+    const clim = this.climate.image.data as Uint8Array;
+    const temp = w.temp, wE = this.wElev, air = this.airT;
+    for (let y = 0; y < H; y++) {
+      const gy = Math.max(0, Math.min(WH - 1.001, (y + 0.5) / 2 - 0.5));
+      const y0 = Math.floor(gy), fy = gy - y0;
+      for (let x = 0; x < W; x++) {
+        const gx = (x + 0.5) / 2 - 0.5;
+        const x0 = Math.floor(gx), fx = gx - x0;
+        const xa = (x0 + WW) % WW, xb = (x0 + 1) % WW;
+        const a = y0 * WW + xa, b = y0 * WW + xb, c = (y0 + 1) * WW + xa, d = (y0 + 1) * WW + xb;
+        const t = (temp[a] * (1 - fx) + temp[b] * fx) * (1 - fy) + (temp[c] * (1 - fx) + temp[d] * fx) * fy;
+        const e = (wE[a] * (1 - fx) + wE[b] * fx) * (1 - fy) + (wE[c] * (1 - fx) + wE[d] * fx) * fy;
+        const i = y * W + x;
+        const T = t / 2 - 6.5 * (Math.max(0, p.elev[i]) - e);
+        air[i] += (T - air[i]) * k;
+        clim[i * 4] = Math.max(0, Math.min(255, Math.round((air[i] + 50) * 2)));
+      }
+    }
+    this.climate.needsUpdate = true;
   }
 
   /** Each people's lands, as soft coloured territories around their towns. */
