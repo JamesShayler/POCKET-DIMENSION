@@ -1,0 +1,22 @@
+// Visual smoke test: boots the app in headless Chromium (software GL), fast-forwards history and takes screenshots.
+import { chromium } from 'playwright-core';
+import { spawn } from 'node:child_process';
+const out = process.argv[2] ?? '/tmp/claude-0/shots';
+const vite = spawn('npx', ['vite', '--port', '5199', '--strictPort'], { stdio: 'ignore' });
+await new Promise((r) => setTimeout(r, 2500));
+const browser = await chromium.launch({ executablePath: '/opt/pw-browsers/chromium', args: ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--no-sandbox'] });
+const page = await browser.newPage({ viewport: { width: 1180, height: 720 } });
+page.on('console', (m) => { if (m.type() === 'error' && !m.text().includes('404')) console.log('[console]', m.text().slice(0, 300)); });
+page.on('pageerror', (e) => console.log('[pageerror]', e.message));
+await page.goto('http://localhost:5199/#seed=pocket&autostart');
+await page.waitForFunction(() => window.pd, null, { timeout: 120000 });
+await page.evaluate(() => { const { world, engine } = window.pd; engine.setSpeed(0); let n = 0; while (!world.awakened && n < 8000) { world.stepPrehistory(40); n += 40; } engine.setSpeed(0); for (let i = 0; i < 120 * 360 / 7; i++) world.step(7); engine.setSpeed(0); });
+const shoot = async (name, fn, wait = 7000) => { await page.evaluate(fn); await page.waitForTimeout(wait); await page.screenshot({ path: `${out}/${name}.png` }); };
+await shoot('s1-overview', () => { const { world, engine, view } = window.pd; const sets = world.activeSettlements().sort((a, b) => b.pop - a.pop); const s = sets[0]; view.follow = null; view.rig.follow = null; view.rig.cancelFly(); view.rig.lon = (s.x / 256 * 2 - 1) * Math.PI; view.rig.lat = Math.PI / 2 - s.y / 128 * Math.PI; view.rig.alt = 2600; view.rig.pitch = 0.5; view.visualPhase = view.rig.lon - 0.6; view.planet.updateColors(); });
+await shoot('s2-political', () => { const { view } = window.pd; view.planet.politics = true; view.planet.updateColors(); view.rig.alt = 1500; });
+await shoot('s3-region', () => { const { view } = window.pd; view.planet.politics = false; view.planet.updateColors(); view.rig.alt = 160; view.rig.pitch = 0.9; });
+await shoot('s4-person', () => { const { world, ui, view } = window.pd; const s = world.activeSettlements().sort((a, b) => b.pop - a.pop)[0]; const p = world.alive.filter((q) => q.home === s.id && q.children.length > 1 && q.ageYears(world.day) > 30)[0] ?? world.alive[0]; ui.select('person', p.id, true); view.rig.alt = 6; view.visualPhase = view.rig.lon - 0.6; }, 9000);
+await shoot('s5-almanac', () => { const { ui } = window.pd; ui.clearSelection(); ui.openAlmanac('chronicle'); }, 2500);
+await shoot('s6-dev', () => { const { ui } = window.pd; ui.closeAlmanac(); document.getElementById('dev').classList.add('open'); ui.select('civ', 1, false); }, 2500);
+await browser.close();
+vite.kill();
