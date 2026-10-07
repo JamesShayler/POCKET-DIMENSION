@@ -166,9 +166,7 @@ export class Space {
     const rng = w.rng;
     this.satellites = this.satellites.filter((s) => s.until > day);
     for (const civ of w.livingCivs()) {
-      const cap = w.settlements[civ.capital - 1];
-      if (!cap || !cap.tech.has('rocketry')) continue;
-      const pad = civ.members.map((id) => w.settlements[id - 1]).find((s) => w.buildings.count(s.id, 'launchpad') > 0);
+      const pad = civ.members.map((id) => w.settlements[id - 1]).find((s) => s && s.abandoned < 0 && s.tech.has('rocketry') && w.buildings.count(s.id, 'launchpad') > 0);
       if (!pad) continue;
       const prog = this.program(civ.id);
       const crewedAge = pad.tech.has('spaceflight');
@@ -277,15 +275,18 @@ export class Space {
       this.routes.push({ id: this.next++, kind: 'air', a: a.id, b: b.id, civ: a.civ, since: w.day, path, km: d, fleet: 1 + Math.floor(Math.min(a.pop, b.pop) / 300) });
       w.history.record('TRADE', w.day, `The first scheduled flights linked ${a.name} and ${b.name}.`, 1, { settlement: a.id, x: a.x, y: a.y, cause: `Both cities had airports and a trade worth flying for (${Math.round(d)} km).` });
     }
-    if (d > 40 && w.buildings.count(a.id, 'dock') && w.buildings.count(b.id, 'dock') && !key('sea') && this.routes.filter((r) => r.kind === 'sea').length < 400) {
+    // a lane needs a harbour at one end at least; the other town only has to be on the water (boats can land on a beach)
+    const coastal = (s: Settlement) => { const c = idx(wrapX(Math.floor(s.x)), Math.floor(s.y)); return w.planet.coastDist[c] <= 1 || w.planet.lake[c] === 1; };
+    const harbour = w.buildings.count(a.id, 'dock') > 0 || w.buildings.count(b.id, 'dock') > 0;
+    if (d > 40 && harbour && coastal(a) && coastal(b) && !key('sea') && this.routes.filter((r) => r.kind === 'sea').length < 400) {
       const ocean = (a.tech.has('steam') || (a.tech.has('astronomy') && a.tech.has('navigation'))) ? 2 : 1;
       const path = seaPath(w, a, b, ocean);
       if (path) {
         let km = 0;
         for (let i = 2; i < path.length; i += 2) km += distKm(path[i - 2], path[i - 1], path[i], path[i + 1]);
-        this.routes.push({ id: this.next++, kind: 'sea', a: a.id, b: b.id, civ: a.civ, since: w.day, path, km, fleet: 1 + Math.floor(Math.min(a.ships, b.ships) / 3) });
+        this.routes.push({ id: this.next++, kind: 'sea', a: a.id, b: b.id, civ: a.civ, since: w.day, path, km, fleet: 1 + Math.floor(Math.max(a.ships, b.ships) / 3) });
         if (this.routes.filter((r) => r.kind === 'sea').length === 1 || km > 600) {
-          w.history.record('TRADE', w.day, `Ships began to sail between ${a.name} and ${b.name}.`, 1, { settlement: a.id, x: a.x, y: a.y, cause: `Both had docks, and the sea lane of ${Math.round(km)} km was shorter or safer than any road.` });
+          w.history.record('TRADE', w.day, `Ships began to sail between ${a.name} and ${b.name}.`, 1, { settlement: a.id, x: a.x, y: a.y, cause: `A harbour, ships, and a sea lane of ${Math.round(km)} km that was shorter or safer than any road.` });
         }
       }
     }

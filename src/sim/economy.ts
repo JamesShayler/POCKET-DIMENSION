@@ -136,7 +136,9 @@ function nextProjects(w: World, s: Settlement): { start: BKind[]; shopping: BKin
   want('powerplant', 1 + Math.floor(pop / 1500));
   want('airport', 1 + Math.floor(pop / 3000));
   const civ = w.civs[s.civ - 1];
-  if (civ && civ.capital === s.id && !civ.members.some((id) => id !== s.id && w.buildings.count(id, 'launchpad', false) > 0)) want('launchpad', 1);
+  // a state builds one launch site, at its largest town (often, but not always, the capital)
+  if (civ && !civ.members.some((id) => id !== s.id && w.buildings.count(id, 'launchpad', false) > 0)
+    && civ.members.every((id) => id === s.id || (w.settlements[id - 1]?.pop ?? 0) <= pop)) want('launchpad', 1);
   void underway;
   return { start: out, shopping: out.slice(0, 2) };
 }
