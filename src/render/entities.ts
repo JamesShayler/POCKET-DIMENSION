@@ -141,7 +141,7 @@ export class Entities {
       this.buildStatic(target, day);
     }
     this.pickables = this.staticPicks.slice();
-    this.updatePeople(target, alpha, time, camAlt);
+    this.updatePeople(cam, target, alpha, time, camAlt);
     this.updateAnimals(target, day, time, camAlt);
     this.updateVehicles(target, day, camAlt);
     this.updateSea(target, day, time, camAlt);
@@ -190,7 +190,7 @@ export class Entities {
     if (this.sea.instanceColor) this.sea.instanceColor.needsUpdate = true;
   }
 
-  private updatePeople(target: [number, number, number], alpha: number, time: number, camAlt: number) {
+  private updatePeople(cam: [number, number, number], target: [number, number, number], alpha: number, time: number, camAlt: number) {
     const P = this.c.people;
     let n = 0, nc = 0, nb = 0;
     this.personPos.clear();
@@ -208,6 +208,8 @@ export class Entities {
         if (sail) { const r = Math.hypot(p3[0], p3[1], p3[2]); const k = (R_KM + 0.0004) / r; if (k > 1) { p3[0] *= k; p3[1] *= k; p3[2] *= k; } }
         this.personPos.set(P.id[i], [p3[0], p3[1], p3[2]]);
         if (this.kmTo(p3, target) > range) continue;
+        // someone standing in the observer's eye would only fill the screen with a clipped head
+        if (this.kmTo(p3, cam) < 0.0025) continue;
         const heading = Math.atan2(dx, -(P.y[i] - P.py[i])) || (P.id[i] % 628) / 100;
         const sc = (a.age === 0 ? 0.62 : a.age === 2 ? 0.95 : 1) * (a.female ? 0.95 : 1) * KM;
         const walking = a.act === ACT.walk || (Math.abs(dx) + Math.abs(P.y[i] - P.py[i]) > 1e-7 && a.act !== ACT.sleep);
