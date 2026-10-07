@@ -153,8 +153,10 @@ technology up to spaceflight, diplomacy, war and the observer. What remains simp
   lands on or colonises other planets.
 * Animals are drawn as herds at the positions hunters use (a few per population), not one model per animal.
 * Every person is an individual agent, so a world holds a few thousand people at once: a "city" is a few hundred, a large
-  state several hundred to a thousand. Population thresholds for ideas are calibrated to that scale. History is slow on
-  purpose: in a 1,000-year headless run of seed `pocket`, agriculture arrives around year 250, writing around 450, printing
-  around 600 and steam power around 950; the industrial, electrical and space ages come later still (use **Jump**).
+  state several hundred to a thousand. Population thresholds for ideas and buildings are calibrated to that scale. History
+  is slow on purpose: in a headless run of seed `pocket`, agriculture arrived around year 250, writing around 450, printing
+  around 600, steam around 950, electricity around 1050, industry around 1150, radio around 1400, flight and computing
+  around 1450 and rocketry around 1500; spaceflight comes later still (use **Jump**). The exact pace varies with each
+  world's wars, plagues and collapses.
 * At the highest speeds the engine sheds backlog rather than freezing (the dashboard shows the achieved rate).
 * Headless or software-rendered browsers (no GPU) refine the ground slowly; with a GPU it follows the camera in real time.

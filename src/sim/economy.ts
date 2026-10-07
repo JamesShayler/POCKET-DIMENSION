@@ -149,18 +149,21 @@ function startProjects(w: World, s: Settlement, plan: { start: BKind[] }) {
   const builders = s.occupations['builder'] ?? 0;
   const slots = 1 + Math.floor(builders / 3) - active;
   let started = 0;
+  let homeStarted = false;
   const homeless = s.pop - B.of(s.id).reduce((a, b) => a + (b.done >= -1 ? BDEFS[b.kind].cap : 0), 0);
   for (const k of plan.start) {
     if (started >= slots) break;
     const isHome = HOUSING.includes(k);
-    // among housing tiers only the best affordable one is built (or a hut if people are freezing)
+    // among housing tiers only the best affordable one is built (or a hut if people are freezing); a new house
+    // does not stop the town starting something else if it has the builders for it
+    if (isHome && homeStarted) continue;
     const def = BDEFS[k];
     const afford = (Object.keys(def.cost) as ResKey[]).every((rk) => s.res[rk] >= (def.cost[rk] ?? 0));
     if (!afford) continue;
     if (isHome && homeless <= 1) continue;
     if (B.start(s, k)) {
       started++;
-      if (isHome) break;
+      if (isHome) homeStarted = true;
     }
   }
 }
