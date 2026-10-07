@@ -54,7 +54,16 @@ export class Resources {
     const b = p.biome[cell] as Biome;
     const add = (kind: NodeKind, max: number) => {
       if (out.length >= 63) return;
-      out.push({ kind, x: cx + 0.04 + rng.next() * 0.92, y: cy + 0.04 + rng.next() * 0.92, max: Math.round(max), slot: out.length });
+      // fishing waters must be wet, everything else must stand on dry land
+      for (let t = 0; t < 5; t++) {
+        const x = cx + 0.04 + rng.next() * 0.92, y = cy + 0.04 + rng.next() * 0.92;
+        const e = p.elevAt(x, y);
+        const wet = e <= 0 || (p.lake[cell] && e < p.lakeLevel[cell]);
+        if (kind === 'fish' ? wet || (p.river[cell] && t === 4) : !wet && e > 0.003) {
+          out.push({ kind, x, y, max: Math.round(max), slot: out.length });
+          return;
+        }
+      }
     };
     const veg = 0.35 + p.baseVeg[cell];
     const nt = Math.floor((TREE_BASE[b] ?? 0) * veg + rng.next());

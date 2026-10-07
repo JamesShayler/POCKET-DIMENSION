@@ -1,13 +1,15 @@
 import type { World } from './world';
 import { clamp, lerp } from './rng';
 import { H, W, distKm, idx, wrapDx, wrapX } from './grid';
-import { Band, assignOccupation, cellOf, findSite, traumatize } from './behavior';
+import { ANY_COMP, Band, CIV_RADIUS_KM, FOREIGN_GAP_KM, assignOccupation, cellOf, findSite, traumatize } from './behavior';
 import { ND, P, Person, SK } from './people';
 import { Civ, Government, Settlement, stageFor } from './settlements';
 import { TECHS, TECH_IDS, TechId } from './technology';
 import { DAYS_PER_SEASON, DAYS_PER_YEAR, seasonOf, yearOf } from './time';
 import { NV, VALUE_KEYS } from './culture';
 import { economySeason } from './economy';
+import { wallFactor } from './diplomacy';
+import { contactRange, governRange, innovationMult, oceanGoing } from './techfx';
 
 const TECH_RATE = 0.35;
 const has = (s: Settlement, t: string) => (s.tech as Set<string>).has(t);
@@ -79,6 +81,7 @@ export function settlementSeason(w: World) {
     s.threat = Math.max(0, s.threat - 0.05);
     s.defense = Math.max(0, s.defense * 0.98);
     s.yearsSettled += 0.25;
+    caveLife(w, s);
     // famine event
     if (s.stress > 0.7 && s.pop >= 12 && day - (w.famineAt.get(s.id) ?? -1e9) > 4 * DAYS_PER_YEAR) {
       w.famineAt.set(s.id, day);
@@ -184,7 +187,7 @@ function techSeason(w: World, s: Settlement) {
   // local resources within reach
   const cx = Math.floor(s.x);
   const cy = Math.floor(s.y);
-  const res = { stone: 0, clay: 0, copper: 0, iron: 0, coast: 0, fert: 0, wood: 0 };
+  const res = { stone: 0, clay: 0, copper: 0, iron: 0, coal: 0, coast: 0, fert: 0, wood: 0 };
   for (let dy = -2; dy <= 2; dy++) for (let dx = -2; dx <= 2; dx++) {
     const y = cy + dy;
     if (y < 0 || y >= H) continue;
@@ -194,6 +197,7 @@ function techSeason(w: World, s: Settlement) {
     res.clay = Math.max(res.clay, w.planet.res.clay[i] / 255);
     res.copper = Math.max(res.copper, w.planet.res.copper[i] / 255);
     res.iron = Math.max(res.iron, w.planet.res.iron[i] / 255);
+    res.coal = Math.max(res.coal, w.planet.res.coal[i] / 255);
     res.fert = Math.max(res.fert, w.env.fert[i]);
     res.wood = Math.max(res.wood, w.env.veg[i]);
   }
@@ -204,11 +208,12 @@ function techSeason(w: World, s: Settlement) {
     innov += v * v;
     if (p.occupation === 'scholar') scholars++;
   }
-  innov *= (1 + scholars * 1.5) * (0.6 + 0.8 * cul.values[0]) * (has(s, 'writing') ? 1.3 : 1);
+  innov *= (1 + scholars * 1.5) * (0.6 + 0.8 * cul.values[0]) * (has(s, 'writing') ? 1.3 : 1) * innovationMult(s);
+  const civPop = w.civs[s.civ - 1]?.pop ?? s.pop;
   for (const id of TECH_IDS) {
     if (s.tech.has(id)) continue;
     const t = TECHS[id];
-    if (s.pop < t.minPop) continue;
+    if (s.pop < t.minPop || (t.civPop && civPop < t.civPop)) continue;
     if (!t.prereq.every((q) => s.tech.has(q))) continue;
     let ok = true;
     if (t.needs) for (const k of Object.keys(t.needs) as (keyof typeof res)[]) if (res[k] < (t.needs[k] ?? 0)) ok = false;
@@ -258,10 +263,13 @@ function diffuse(w: World, living: Settlement[]) {
     for (let b = a + 1; b < n; b += step) {
       const B = living[b];
       const d = distKm(A.x, A.y, B.x, B.y);
-      if (d > 200) continue;
+      // ideas travel as far as the better-connected of the two can reach; within one polity they always circulate
+      const range = A.civ === B.civ ? Math.max(400, contactRange(A), contactRange(B)) : Math.max(contactRange(A), contactRange(B));
+      if (d > range) continue;
       const cA = w.cultures.get(A.culture)!;
       const cB = w.cultures.get(B.culture)!;
-      const contact = (1 - d / 200) * (0.5 + 0.25 * (cA.values[5] + cB.values[5])) * (A.culture === B.culture ? 1 : 0.55) * (A.civ === B.civ ? 1.3 : 1);
+      const contact = (1 - d / range) * (0.5 + 0.25 * (cA.values[5] + cB.values[5])) * (A.culture === B.culture ? 1 : 0.55) * (A.civ === B.civ ? 2 : 1)
+        * (w.tradePairs.has(A.id < B.id ? `${A.id}:${B.id}` : `${B.id}:${A.id}`) ? 1.8 : 1);
       for (const [from, to, tc] of [[A, B, cB], [B, A, cA]] as [Settlement, Settlement, typeof cA][]) {
         for (const id of from.tech) {
           if (to.tech.has(id)) continue;
@@ -341,7 +349,7 @@ function nomadMove(w: World, s: Settlement) {
   if (comfort > 0.35 && s.stress < 0.4) return;
   if (w.rng.next() > 0.5) return;
   // look nearby for a better camp
-  const site = findSite(w, s.x, s.y, 120, has(s, 'navigation'), w.landComp[idx(cx, cy)], s.culture, 18);
+  const site = findSite(w, s.x, s.y, 120, has(s, 'navigation'), oceanGoing(s) ? ANY_COMP : w.landComp[idx(cx, cy)], s.culture, 18, s.civ);
   if (!site) return;
   const here0 = w.env.fert[idx(cx, cy)] + w.env.veg[idx(cx, cy)] * 0.4;
   if (site.score < here0 - 0.1) return;
@@ -354,8 +362,8 @@ function nomadMove(w: World, s: Settlement) {
 function migrationCheck(w: World, s: Settlement) {
   if (s.pop < 14) return;
   const cap = capacity(w, s);
-  const over = s.pop > cap * 1.2;
-  const nomadSplit = s.nomadic && s.pop > 48;
+  const over = s.pop > cap * 1.35;
+  const nomadSplit = s.nomadic && s.pop > 70;
   if (!((s.stressSeasons >= 2 && s.stress > 0.45) || over || nomadSplit)) return;
   if (w.day - (w.lastMigration.get(s.id) ?? -1e9) < 1.5 * DAYS_PER_YEAR) return;
   w.lastMigration.set(s.id, w.day);
@@ -396,8 +404,10 @@ export function startMigration(w: World, s: Settlement, reason: string) {
   }
   const radius = clamp(s.knownKm * (1 + s.stress * 0.4), 70, 650);
   const comp = w.landComp[cellOf(seed)];
-  let site = findSite(w, s.x, s.y, radius, has(s, 'navigation'), has(s, 'navigation') ? w.landCompBoat[cellOf(seed)] : comp, s.culture);
-  if (!site) site = findSite(w, s.x, s.y, radius * 1.6, has(s, 'navigation'), has(s, 'navigation') ? w.landCompBoat[cellOf(seed)] : comp, s.culture, 28);
+  const reachComp = oceanGoing(s) ? ANY_COMP : has(s, 'navigation') ? w.landCompBoat[cellOf(seed)] : comp;
+  // first look for room close to home among their own people; if the homeland is full, strike out for empty lands
+  let site = findSite(w, s.x, s.y, Math.min(radius, CIV_RADIUS_KM), has(s, 'navigation'), reachComp, s.culture, 30, s.civ);
+  if (!site) site = findSite(w, s.x, s.y, Math.max(radius * 1.6, 350), has(s, 'navigation'), reachComp, s.culture, 40, 0);
   if (!site) return;
   const members = [...group];
   const band: Band = {
@@ -425,11 +435,22 @@ export function bandStuck(w: World, b: Band) {
   const leader = w.people.get(b.leader);
   if (!leader || !leader.alive) return;
   const from = w.settlements[b.from - 1];
-  const site = findSite(w, leader.x, leader.y, 200, has(from ?? ({ tech: new Set() } as unknown as Settlement), 'navigation'), w.landComp[cellOf(leader)], b.culture, 28);
+  const site = findSite(w, leader.x, leader.y, 260, has(from ?? ({ tech: new Set() } as unknown as Settlement), 'navigation'), w.landComp[cellOf(leader)], b.culture, 30, b.kind === 'migrants' ? b.civ : 0);
   leader.stuck = 0;
   if (site && !b.returning) { b.tx = site.x; b.ty = site.y; return; }
   // give up and go home (or settle where they stand)
   if (from && from.abandoned < 0 && !b.returning) { b.tx = from.x; b.ty = from.y; b.returning = true; return; }
+  if (!b.returning && b.kind === 'migrants') {
+    // home is gone: join the nearest town of our own people rather than squat beside strangers
+    let kin: Settlement | undefined;
+    let kd = 400;
+    for (const s of w.activeSettlements()) {
+      if (s.civ !== b.civ && s.culture !== b.culture) continue;
+      const d = distKm(s.x, s.y, leader.x, leader.y);
+      if (d < kd) { kd = d; kin = s; }
+    }
+    if (kin) { b.tx = kin.x; b.ty = kin.y; b.returning = true; return; }
+  }
   b.returning = false;
   b.tx = leader.x; b.ty = leader.y;
   arriveBand(w, b);
@@ -468,7 +489,8 @@ export function arriveBand(w: World, b: Band) {
   let name: string | undefined;
   if (b.kind === 'migrants') {
     note = `Founded by ${members.length} migrants from ${from?.name ?? 'afar'}: ${b.note}.`;
-    if (from && parentCiv && parentCiv.collapsed < 0 && distKm(from.x, from.y, site.x, site.y) < 450) civId = parentCiv.id;
+    // a colony stays with its people if it is within reach of any of their towns
+    if (from && parentCiv && parentCiv.collapsed < 0 && parentCiv.members.some((id) => { const o = w.settlements[id - 1]; return o.abandoned < 0 && distKm(o.x, o.y, site.x, site.y) < CIV_RADIUS_KM * 1.5; })) civId = parentCiv.id;
   } else {
     // outcasts: a new culture shaped by the founder's rejection of the old one
     const oldC = w.cultures.get(b.culture)!;
@@ -485,7 +507,7 @@ export function arriveBand(w: World, b: Band) {
   }
   const nomadic = !b.tech.has('agriculture');
   const s = w.foundSettlement({
-    x: Math.floor(site.x) + 0.5, y: Math.floor(site.y) + 0.5, culture, civ: civId || undefined, founder: leader.id, parent: from?.id, tech: b.tech, nomadic, note, name,
+    ...(w.planet.landNear(Math.floor(site.x) + 0.5, Math.floor(site.y) + 0.5) ?? { x: Math.floor(site.x) + 0.5, y: Math.floor(site.y) + 0.5 }), culture, civ: civId || undefined, founder: leader.id, parent: from?.id, tech: b.tech, nomadic, note, name,
   });
   s.knownKm = from ? Math.max(90, from.knownKm * 0.6) : 90;
   if (!civId) {
@@ -516,7 +538,7 @@ function resolveRaid(w: World, b: Band, members: Person[], leader: Person) {
   for (const m of members) attack += m.personality[P.aggression] * 0.6 + m.personality[P.bravery] * 0.4 + 0.3;
   let defense = 0;
   for (const d of defenders) defense += (d.occupation === 'warrior' ? 1 : 0.35) * (0.6 + d.personality[P.bravery] * 0.5);
-  defense *= 1 + target.defense * 5 + (has(target, 'metallurgy') ? 0.4 : 0);
+  defense *= (1 + target.defense * 5 + (has(target, 'metallurgy') ? 0.4 : 0)) * wallFactor(w, target);
   const win = w.rng.next() < attack / (attack + defense + 0.01);
   const killTheirs = Math.round(defenders.length * (win ? 0.04 + w.rng.next() * 0.1 : 0.01));
   const killOurs = Math.round(members.length * (win ? 0.05 : 0.2 + w.rng.next() * 0.2));
@@ -692,9 +714,47 @@ function makeOutcast(w: World, s: Settlement, p: Person, adults: Person[], alien
   if (bandKind === 'raiders') {
     pickRaidTarget(w, band, p);
   } else {
-    const site = findSite(w, s.x, s.y, 450, has(s, 'navigation'), w.landComp[idx(wrapX(Math.floor(s.x)), Math.floor(s.y))], s.culture, 30);
+    const site = findSite(w, s.x, s.y, 600, has(s, 'navigation'), w.landComp[idx(wrapX(Math.floor(s.x)), Math.floor(s.y))], s.culture, 30, 0);
     if (site) { band.tx = site.x; band.ty = site.y; }
     else { for (const m of withKids) { m.band = 0; } w.bands.delete(band.id); p.goal = 'wander'; }
+  }
+}
+
+// ============================ caves ============================
+/** A cave within a few hours' walk of a settlement (cell index), or -1. */
+export function caveNear(w: World, s: Settlement): number {
+  const cx = Math.floor(s.x), cy = Math.floor(s.y);
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const y = cy + dy;
+    if (y < 0 || y >= H) continue;
+    const i = idx(wrapX(cx + dx), y);
+    if (w.planet.cave[i]) return i;
+  }
+  return -1;
+}
+
+/** Caves shelter early peoples, become sacred places and canvases, and lead prospectors to buried ore. */
+function caveLife(w: World, s: Settlement) {
+  const c = caveNear(w, s);
+  if (c < 0) return;
+  const rng = w.rng;
+  if (!has(s, 'writing') && s.pop >= 12 && rng.next() < 0.012) {
+    const cul = w.cultures.get(s.culture)!;
+    const adults = adultsOf(w, s.id);
+    if (!adults.length) return;
+    const artist = adults.reduce((a, b) => (b.personality[P.creativity] > a.personality[P.creativity] ? b : a));
+    const sp = w.eco.species.filter((x) => x.extinct < 0 && x.diet !== 'omni');
+    const subject = sp.length ? sp[rng.int(sp.length)].name : 'the hunt';
+    const kind = rng.next() < 0.6 ? `herds of ${subject}` : rng.next() < 0.5 ? 'hands outlined in ochre' : `a hunt of ${subject}`;
+    w.cavePaintings.push({ cell: c, settlement: s.id, culture: s.culture, day: w.day, artist: artist.id, subject: kind });
+    artist.reputation = clamp(artist.reputation + 0.2);
+    artist.remember({ day: w.day, kind: 'art', text: `Painted ${kind} on the walls of a cave`, valence: 0.7, intensity: 0.7, x: s.x, y: s.y });
+    if (w.cavePaintings.filter((p) => p.culture === s.culture).length === 1) {
+      w.history.record('LEGEND', w.day, `${artist.name} of the ${cul.name} painted ${kind} on the walls of a cave near ${s.name}.`, 2, {
+        persons: [artist.id], settlement: s.id, culture: s.culture, x: (c % W) + 0.5, y: Math.floor(c / W) + 0.5,
+        cause: 'A sheltered cave, firelight and a people with stories to tell.',
+      });
+    }
   }
 }
 
@@ -733,6 +793,7 @@ export function civSeason(w: World) {
     if (civ.legitimacy < -0.75 && members.length > 1 && civ.pop >= 80) collapse(w, civ, members);
     civ.rank = rankOf(civ, cap);
   }
+  politicalGeography(w);
 }
 
 function rankOf(civ: Civ, cap: Settlement): string {
@@ -817,16 +878,144 @@ function coup(w: World, civ: Civ, cap: Settlement) {
   });
 }
 
+/** A collapsing state breaks into regional successors: the largest surviving towns become capitals and their neighbours follow them. */
 function collapse(w: World, civ: Civ, members: Settlement[]) {
   civ.collapsed = w.day;
-  w.history.record('CIVILIZATION_COLLAPSE', w.day, `The ${civ.name} collapsed, breaking into ${members.length} independent communities.`, 3, {
+  const sorted = [...members].sort((a, b) => b.pop - a.pop);
+  const groups: Settlement[][] = [];
+  const taken = new Set<number>();
+  for (const s of sorted) {
+    if (taken.has(s.id)) continue;
+    const g = [s];
+    taken.add(s.id);
+    for (const o of sorted) if (!taken.has(o.id) && distKm(s.x, s.y, o.x, o.y) < CIV_RADIUS_KM * 0.8) { g.push(o); taken.add(o.id); }
+    groups.push(g);
+  }
+  w.history.record('CIVILIZATION_COLLAPSE', w.day, `The ${civ.name} collapsed, breaking into ${groups.length} successor${groups.length > 1 ? ' states' : ''}.`, 3, {
     civ: civ.id, culture: civ.culture, x: members[0].x, y: members[0].y, cause: 'Prolonged hardship destroyed the legitimacy that held its settlements together.',
   });
-  for (const s of members) {
-    const c = w.createCiv(s, 'Emerged from the ruins of the ' + civ.name + '.', civ.id);
-    const lead = s.leader ? w.people.get(s.leader) : undefined;
+  for (const g of groups) {
+    const c = w.createCiv(g[0], 'Emerged from the ruins of the ' + civ.name + '.', civ.id);
+    for (const o of g.slice(1)) { o.civ = c.id; c.members.push(o.id); }
+    const lead = g[0].leader ? w.people.get(g[0].leader) : undefined;
     c.leader = lead?.alive ? lead.id : 0;
     c.legitimacy = 0.3;
     c.government = 'tribal leadership';
   }
+}
+
+/**
+ * Borders settle into compact states: towns far from the capital drift out of its control and break away (taking their
+ * neighbours with them), and a small people squeezed against a much larger neighbour of similar culture is absorbed by it.
+ */
+function politicalGeography(w: World) {
+  const rng = w.rng;
+  for (const civ of w.livingCivs()) {
+    if (civ.members.length < 2) continue;
+    const cap = w.settlements[civ.capital - 1];
+    vassals(w, civ, cap);
+    for (const id of civ.members) {
+      const s = w.settlements[id - 1];
+      if (s === cap || s.abandoned >= 0 || s.civ !== civ.id || s.pop < 25) continue;
+      const d = distKm(s.x, s.y, cap.x, cap.y);
+      const reach = governRange(cap);
+      const lord = s.lord ? w.people.get(s.lord) : undefined;
+      // a disloyal lord raises his town in revolt; an ungoverned town too far away simply drifts off
+      if (lord?.alive && s.loyalty < 0.12 && rng.next() < 0.3) { secede(w, civ, s, cap, d, lord.id); break; }
+      if (d < reach || lord?.alive) continue;
+      const p = 0.03 + Math.max(0, -civ.legitimacy) * 0.15 + (d / reach - 1) * 0.05;
+      if (rng.next() < p) { secede(w, civ, s, cap, d); break; }
+    }
+  }
+  const active = w.activeSettlements();
+  for (const small of w.livingCivs()) {
+    if (small.members.length > 2) continue;
+    const sc = w.settlements[small.capital - 1];
+    if (!sc || sc.abandoned >= 0) continue;
+    let best: Civ | undefined;
+    let bd = FOREIGN_GAP_KM;
+    for (const s of active) {
+      if (s.civ === small.id) continue;
+      const d = distKm(s.x, s.y, sc.x, sc.y);
+      if (d >= bd) continue;
+      const o = w.civs[s.civ - 1];
+      if (o && o.collapsed < 0 && o.pop > small.pop * 1.8) { bd = d; best = o; }
+    }
+    if (!best) continue;
+    const rel = w.diplomacy.get(small.id, best.id);
+    if (rel.war) continue;
+    const ca = w.cultures.get(small.culture), cb = w.cultures.get(best.culture);
+    const kin = ca && cb ? 1 - w.cultures.distance(ca, cb) : 0.5;
+    const p = 0.08 * (1 - bd / FOREIGN_GAP_KM) * (rel.tension < 0.5 ? 1 : 0.35) * (0.4 + kin) * (rel.trade > 0 ? 1.5 : 1);
+    if (rng.next() >= p) continue;
+    const names = small.members.map((id) => w.settlements[id - 1].name).join(' and ');
+    for (const id of small.members) { const s = w.settlements[id - 1]; s.civ = best.id; best.members.push(id); }
+    small.members = [];
+    small.collapsed = w.day;
+    w.history.record('CIVILIZATION_COLLAPSE', w.day, `The ${small.name} joined the ${best.name}.`, 2, {
+      civ: best.id, settlement: sc.id, x: sc.x, y: sc.y, culture: small.culture,
+      cause: `${names}, only ${Math.round(bd)} km from the ${best.name} and ${kin > 0.6 ? 'of kindred customs' : 'outnumbered'}, ${rel.trade > 0 ? 'already traded with them and ' : ''}chose union over rivalry.`,
+    });
+  }
+}
+
+/**
+ * Larger polities rule their outlying towns through lords: the best-placed local notable governs for the ruler. Loyalty
+ * grows with the ruler's legitimacy and kinship, and erodes with distance, hardship, foreign customs and the lord's own
+ * ambition.
+ */
+function vassals(w: World, civ: Civ, cap: Settlement) {
+  const ruler = civ.leader ? w.people.get(civ.leader) : undefined;
+  for (const id of civ.members) {
+    const s = w.settlements[id - 1];
+    if (s === cap || s.abandoned >= 0 || s.pop < 30) { s.lord = 0; continue; }
+    let lord = s.lord ? w.people.get(s.lord) : undefined;
+    if (!lord || !lord.alive || lord.home !== s.id) {
+      const cands = adultsOf(w, s.id);
+      if (!cands.length) { s.lord = 0; continue; }
+      lord = cands.reduce((a, b) => (leaderScore(b) > leaderScore(a) ? b : a));
+      const kin = !!ruler && (ruler.relations.get(lord.id)?.kind === 'kin' || ruler.children.includes(lord.id));
+      s.lord = lord.id;
+      s.loyalty = clamp(0.55 + (kin ? 0.3 : 0) + w.rng.next() * 0.1 - (lord.personality[P.ambition] - 0.5) * 0.2);
+      lord.status = clamp(lord.status + 0.2);
+      lord.remember({ day: w.day, kind: 'leader', text: `Became lord of ${s.name} under the ${civ.name}`, valence: 0.6, intensity: 0.7, x: s.x, y: s.y });
+      if (s.pop >= 150) w.history.record('SUCCESSION', w.day, `${lord.name} became lord of ${s.name}, ruling for the ${civ.name}${kin ? ` as kin of ${ruler!.name}` : ''}.`, 1, {
+        persons: [lord.id], settlement: s.id, civ: civ.id, x: s.x, y: s.y, cause: `${s.name} lies ${Math.round(distKm(s.x, s.y, cap.x, cap.y))} km from the capital and needs a governor.`,
+      });
+    }
+    const d = distKm(s.x, s.y, cap.x, cap.y);
+    const reach = governRange(cap);
+    s.loyalty = clamp(s.loyalty + 0.012 * civ.legitimacy + 0.006 - 0.025 * Math.max(0, d / reach - 0.6) - 0.02 * (lord.personality[P.ambition] - 0.5)
+      - 0.02 * s.stress - (s.culture !== cap.culture ? 0.012 : 0) + (s.threat > 0.3 ? 0.01 : 0));
+  }
+}
+
+function secede(w: World, civ: Civ, s: Settlement, cap: Settlement, d: number, rebel = 0) {
+  civ.members = civ.members.filter((id) => id !== s.id);
+  const lordP = rebel ? w.people.get(rebel) : undefined;
+  const c = w.createCiv(s, lordP ? `${lordP.name}, lord of ${s.name}, rose against the ${civ.name}.` : `${s.name}, ${Math.round(d)} km from ${cap.name}, broke away from the ${civ.name}.`, civ.id);
+  const lead = lordP ?? (s.leader ? w.people.get(s.leader) : undefined);
+  c.leader = lead?.alive ? lead.id : 0;
+  s.lord = 0;
+  s.loyalty = 1;
+  c.legitimacy = 0.35;
+  c.government = civ.government;
+  // nearby towns that are themselves far from the old capital follow the new one
+  for (const id of [...civ.members]) {
+    const o = w.settlements[id - 1];
+    if (o === cap || o.abandoned >= 0) continue;
+    if (distKm(o.x, o.y, s.x, s.y) < CIV_RADIUS_KM * 0.7 && distKm(o.x, o.y, cap.x, cap.y) > CIV_RADIUS_KM * 1.2) {
+      o.civ = c.id;
+      c.members.push(o.id);
+      civ.members = civ.members.filter((i) => i !== o.id);
+    }
+  }
+  // a lord's revolt is a war of independence; a quiet drift apart leaves only resentment
+  w.diplomacy.get(civ.id, c.id).tension = Math.max(w.diplomacy.get(civ.id, c.id).tension, lordP ? 0.95 : 0.45);
+  w.history.record('REVOLT', w.day, lordP ? `${lordP.name}, lord of ${s.name}, rebelled against the ${civ.name} and proclaimed the ${c.name}.` : `${s.name} seceded from the ${civ.name}, founding the ${c.name}.`, lordP ? 3 : 2, {
+    persons: lordP ? [lordP.id] : [], civ: c.id, settlement: s.id, x: s.x, y: s.y, culture: s.culture,
+    cause: lordP
+      ? `Loyalty to the ${civ.name} had worn away: ${Math.round(d)} km from the capital${civ.legitimacy < 0 ? ', rulers who had lost legitimacy' : ''}${s.stress > 0.3 ? ', hard times' : ''}, and an ambitious lord.`
+      : `It lay ${Math.round(d)} km from the capital ${cap.name}${civ.legitimacy < 0 ? ' and the rulers had lost legitimacy' : ''}, too far to be governed.`,
+  });
 }

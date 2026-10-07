@@ -11,6 +11,11 @@
   canvas#view { position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none; }
   #labels { position:fixed; inset:0; pointer-events:none; overflow:hidden; }
   .label { position:absolute; left:0; top:0; font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:#f4f1e6; text-shadow:0 0 6px #000,0 0 2px #000; white-space:nowrap; }
+  .label.cap { font-weight:600; color:#fff4d6; } .label.cap::before { content:'★ '; color:var(--warm); }
+  .label.body { color:#b9d4ff; font-size:10px; letter-spacing:.18em; }
+  .selmark { position:absolute; left:0; top:0; border:2px solid #fff1b0; border-radius:50%; box-shadow:0 0 10px rgba(255,241,176,.6); display:none; pointer-events:none; animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { border-color: rgba(255,241,176,.45); } }
+  .ping { position:absolute; left:0; top:0; border:2px solid #ffd27a; border-radius:50%; pointer-events:none; }
   .glass { background:var(--glass); backdrop-filter:blur(14px) saturate(1.2); -webkit-backdrop-filter:blur(14px) saturate(1.2); border:1px solid var(--line); border-radius:12px; }
   #ui.hidden > :not(#menu):not(#loading) { opacity:0; pointer-events:none; }
   #top { position:fixed; left:16px; top:14px; display:flex; flex-direction:column; gap:2px; text-shadow:0 0 8px #000; }

@@ -35,7 +35,7 @@ export function economySeason(w: World, s: Settlement) {
   // --- tools wear out and are replaced
   if (!has(s, 'tools')) s.toolTier = 0;
   else if (has(s, 'metallurgy') && s.res.metal > 1 && w.buildings.count(s.id, 'smithy') > 0) {
-    s.toolTier = 2;
+    s.toolTier = has(s, 'ironworking') && s.res.iron + s.res.metal > 3 ? 3 : 2;
     s.res.metal = Math.max(0, s.res.metal - Math.max(0.05, s.pop * 0.002));
   } else s.toolTier = 1;
   // --- everybody burns wood for cooking and warmth
@@ -46,6 +46,22 @@ export function economySeason(w: World, s: Settlement) {
   }
   // goods wear out, are used up and are given away
   s.goods *= 0.93;
+  // shipwrights at the docks keep a small fleet afloat
+  const docks = w.buildings.count(s.id, 'dock');
+  if (docks) {
+    s.ships *= 0.97; // wrecks and wear
+    const wantShips = docks * 4 + s.pop / 120;
+    if (s.ships < wantShips && s.res.wood > 70) { s.res.wood -= 50; s.ships += 1; }
+  } else s.ships *= 0.8;
+  // factories turn materials into goods; their smoke and clearings spread around the town
+  const factories = w.buildings.count(s.id, 'factory');
+  if (factories) {
+    const use = Math.min(s.res.wood * 0.2, factories * 30);
+    s.res.wood -= use;
+    s.goods += factories * 25 + use * 1.5;
+    const ci = idx(wrapX(Math.floor(s.x)), Math.floor(s.y));
+    w.env.veg[ci] = Math.max(0.05, w.env.veg[ci] - 0.01 * factories);
+  }
   // --- housing
   s.housing = w.buildings.capacity(s.id);
   // --- fields: crops ripen, weeds creep
@@ -110,6 +126,16 @@ function nextProjects(w: World, s: Settlement): { start: BKind[]; shopping: BKin
   want('market', (s.occupations['trader'] ?? 0) > 0 || pop >= 150 ? 1 + Math.floor(pop / 500) : 0);
   want('temple', (s.occupations['priest'] ?? 0) > 0 ? 1 + Math.floor(pop / 700) : 0);
   want('tower', s.threat > 0.25 ? 1 + Math.floor(pop / 250) : 0);
+  // walls: a palisade first, stone when the town can afford masons
+  const raided = s.threat > 0.25 || w.day - s.lastRaid < 4 * DAYS_PER_YEAR;
+  if (raided) { if (has(s, 'architecture') && pop >= BDEFS.wall.minPop) want('wall', 1); else if (!cnt('wall')) want('palisade', 1); }
+  const c = idx(wrapX(Math.floor(s.x)), Math.floor(s.y));
+  if (w.planet.coastDist[c] <= 1 || w.planet.lake[c]) want('dock', 1 + Math.floor(pop / 700));
+  want('factory', 1 + Math.floor(pop / 400));
+  want('powerplant', 1 + Math.floor(pop / 1500));
+  want('airport', pop >= 900 ? 1 + Math.floor(pop / 6000) : 0);
+  const civ = w.civs[s.civ - 1];
+  if (civ && civ.capital === s.id && !civ.members.some((id) => id !== s.id && w.buildings.count(id, 'launchpad', false) > 0)) want('launchpad', 1);
   void underway;
   return { start: out, shopping: out.slice(0, 2) };
 }

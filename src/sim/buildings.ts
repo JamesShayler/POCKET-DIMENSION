@@ -11,7 +11,8 @@ export const emptyStock = (): Stock => ({ wood: 0, stone: 0, clay: 0, copper: 0,
 
 export type BKind =
   | 'hut' | 'house' | 'brickhouse' | 'stonehouse' | 'granary' | 'workshop' | 'kiln' | 'smithy'
-  | 'market' | 'temple' | 'hall' | 'tower' | 'well' | 'field';
+  | 'market' | 'temple' | 'hall' | 'tower' | 'well' | 'field'
+  | 'dock' | 'palisade' | 'wall' | 'factory' | 'powerplant' | 'airport' | 'launchpad';
 
 export interface BDef {
   name: string;
@@ -39,7 +40,16 @@ export const BDEFS: Record<BKind, BDef> = {
   tower: { name: 'Watchtower', cost: { stone: 170, wood: 50 }, labor: 300, cap: 0, size: 0.012, tech: ['architecture'], minPop: 60 },
   well: { name: 'Well', cost: { stone: 50 }, labor: 80, cap: 0, size: 0.006, tech: ['tools'], minPop: 40 },
   field: { name: 'Field', cost: {}, labor: 150, cap: 0, size: 0.1, tech: ['agriculture'], minPop: 0 },
+  dock: { name: 'Dock', cost: { wood: 160, stone: 60 }, labor: 320, cap: 0, size: 0.03, tech: ['navigation'], minPop: 50 },
+  palisade: { name: 'Palisade', cost: { wood: 260 }, labor: 380, cap: 0, size: 0, tech: ['tools'], minPop: 60 },
+  wall: { name: 'Town wall', cost: { stone: 700, wood: 60 }, labor: 1800, cap: 0, size: 0, tech: ['architecture'], minPop: 220 },
+  factory: { name: 'Factory', cost: { stone: 300, wood: 100, metal: 40 }, labor: 1500, cap: 0, size: 0.06, tech: ['industry'], minPop: 300 },
+  powerplant: { name: 'Power station', cost: { stone: 400, metal: 80 }, labor: 2400, cap: 0, size: 0.07, tech: ['electricity'], minPop: 500 },
+  airport: { name: 'Airport', cost: { stone: 700, metal: 60 }, labor: 4000, cap: 0, size: 0.5, tech: ['flight'], minPop: 900 },
+  launchpad: { name: 'Launch site', cost: { stone: 900, metal: 220 }, labor: 9000, cap: 0, size: 0.25, tech: ['rocketry'], minPop: 1200 },
 };
+/** Ring defences: drawn around the whole town, not placed as a single footprint. */
+export const RINGS: BKind[] = ['palisade', 'wall'];
 export const HOUSING: BKind[] = ['hut', 'house', 'brickhouse', 'stonehouse'];
 
 export interface Building {
@@ -96,17 +106,24 @@ export class Buildings {
     const def = BDEFS[kind];
     const isField = kind === 'field';
     const n = mine.length;
-    for (let attempt = 0; attempt < 30; attempt++) {
+    if (RINGS.includes(kind)) return { x: s.x, y: s.y };
+    const far = kind === 'factory' || kind === 'powerplant' ? [0.5, 1.6] : kind === 'airport' ? [2.5, 4] : kind === 'launchpad' ? [5, 9] : kind === 'dock' ? [0.05, 4] : null;
+    for (let attempt = 0; attempt < (kind === 'dock' ? 120 : 30); attempt++) {
       // radial density falls off from the centre; civic buildings stay central
       const civic = kind === 'hall' || kind === 'market' || kind === 'temple' || kind === 'well';
-      const rKm = isField ? 0.5 + Math.sqrt(rng.next()) * (1.2 + Math.sqrt(s.pop) * 0.12 + n * 0.01) : civic ? 0.03 + rng.next() * 0.12 : 0.05 + Math.sqrt(rng.next()) * (0.12 + Math.sqrt(n + 3) * 0.075);
+      const rKm = far ? far[0] + rng.next() * (far[1] - far[0]) : isField ? 0.35 + Math.sqrt(rng.next()) * (0.8 + Math.sqrt(s.pop) * 0.08 + n * 0.004) : civic ? 0.03 + rng.next() * 0.12 : 0.03 + Math.sqrt(rng.next()) * (0.06 + Math.sqrt(n + 3) * 0.042);
       const ang = rng.next() * Math.PI * 2;
       const y = s.y + (Math.sin(ang) * rKm) / KM_PER_CELL_Y;
       if (y < 0.2 || y > H - 0.2) continue;
       const x = s.x + (Math.cos(ang) * rKm) / kmPerCellX(y);
       const xi = wrapX(Math.floor(x));
       const cell = idx(xi, Math.floor(y));
-      if (p.ocean[cell] || p.lake[cell] || p.elev[cell] > 3.2) continue;
+      if (p.ocean[cell] || p.elev[cell] > 3.2 || !p.isLand(x, y, 0.004)) continue;
+      if (kind === 'dock') {
+        // a dock stands on the shore: land here, water a few dozen metres further out
+        const ox = x + (Math.cos(ang) * 0.06) / kmPerCellX(y), oy = y + (Math.sin(ang) * 0.06) / KM_PER_CELL_Y;
+        if (p.isLand(ox, oy, 0.0)) continue;
+      }
       let ok = true;
       for (const b of mine) {
         const kx = kmPerCellX(y);
@@ -153,11 +170,11 @@ export class Buildings {
   }
 
   /** Return destroyed/abandoned buildings of a settlement to the wild. */
-  destroy(sid: number, fraction: number, rng: Rng): number {
+  destroy(sid: number, fraction: number, rng: Rng, weight?: (b: Building) => number): number {
     let n = 0;
     const keep: Building[] = [];
     for (const b of this.of(sid)) {
-      if (rng.next() < fraction) { b.progress = 0; b.done = -2; n++; } else keep.push(b);
+      if (rng.next() < fraction * (weight ? weight(b) : 1)) { b.progress = 0; b.done = -2; n++; } else keep.push(b);
     }
     this.bySettlement.set(sid, keep);
     return n;

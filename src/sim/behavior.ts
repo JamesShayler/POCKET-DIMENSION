@@ -8,6 +8,7 @@ import { DAYS_PER_YEAR, seasonOf } from './time';
 import { NV } from './culture';
 import { runJob } from './jobs';
 import { isNight, localTime } from './time';
+import { healthMult, oceanGoing, travelMult } from './techfx';
 
 export interface Band {
   id: number;
@@ -26,6 +27,9 @@ export interface Band {
   lastRaid: number;
   returning?: boolean;
   lastTarget?: number;
+  /** day a siege began (armies at a walled town), and the last assault */
+  siege?: number;
+  lastAssault?: number;
 }
 
 const SEASON_YIELD = [0.75, 1.15, 1.4, 0.3];
@@ -33,16 +37,29 @@ const SEASON_YIELD = [0.75, 1.15, 1.4, 0.3];
 export const cellOf = (p: Person) => idx(wrapX(Math.floor(p.x)), clamp(Math.floor(p.y), 0, H - 1));
 const hasTech = (s: Settlement | undefined, t: string) => !!s && (s.tech as Set<string>).has(t);
 
-/** Can this position be walked on (or sailed, with navigation)? */
-function passable(w: World, x: number, y: number, boat: boolean): boolean {
+/** Boats: 0 none, 1 coastal craft (shallow seas and straits), 2 ocean-going ships. */
+export type Boat = boolean | 0 | 1 | 2;
+export function boatOf(s: Settlement | undefined): 0 | 1 | 2 {
+  return oceanGoing(s) ? 2 : hasTech(s, 'navigation') ? 1 : 0;
+}
+
+/** Can this position be walked on (or sailed)? */
+function passable(w: World, x: number, y: number, boat: Boat, exact = false): boolean {
+  const b = +boat;
   if (y < 0 || y >= H) return false;
   const i = idx(wrapX(Math.floor(x)), Math.floor(y));
-  if (w.planet.ocean[i]) return boat && w.planet.elev[i] > -2.4;
+  if (exact) {
+    // short steps are checked against the real coastline (the one the renderer draws)
+    const e = w.planet.elevAt(x, y);
+    if (e <= 0.001 || (w.planet.lake[i] && e < w.planet.lakeLevel[i])) return b >= 2 || (b >= 1 && e > -2.4);
+    return e < 5.2;
+  }
+  if (w.planet.ocean[i]) return b >= 2 || (b >= 1 && w.planet.elev[i] > -2.4);
   return w.planet.elev[i] < 4.8;
 }
 
 /** Greedy walk with obstacle sidestepping, in kilometres. Returns true on arrival (within `tol` km). */
-export function walk(w: World, p: Person, tx: number, ty: number, km: number, boat: boolean, tol = 0.03): boolean {
+export function walk(w: World, p: Person, tx: number, ty: number, km: number, boat: Boat, tol = 0.03): boolean {
   let guard = 0;
   const side = p.id % 2 === 0 ? 1 : -1;
   const ky = KM_PER_CELL_Y;
@@ -59,7 +76,7 @@ export function walk(w: World, p: Person, tx: number, ty: number, km: number, bo
       const a = ang + side * ((k + 1) >> 1) * (k % 2 === 0 ? 1 : -1) * (Math.PI / 4);
       const nx = p.x + (Math.cos(a) * step) / kx;
       const ny = p.y + (Math.sin(a) * step) / ky;
-      if (passable(w, nx, ny, boat)) {
+      if (passable(w, nx, ny, boat, step < 3)) {
         p.x = ((nx % W) + W) % W;
         p.y = ny;
         const e = w.planet.elev[idx(wrapX(Math.floor(p.x)), Math.floor(p.y))];
@@ -82,7 +99,18 @@ export function kmTo(p: { x: number; y: number }, x: number, y: number): number 
 export const WALK_KMH = 4.5;
 
 // -------- site selection (used by migration, outcasts, founding) --------
-export function findSite(w: World, ox: number, oy: number, radiusKm: number, boat: boolean, fromComp: number, culture: number, avoidKm = 35): { x: number; y: number; score: number } | null {
+/** Minimum gap (km) between settlements of different peoples, and how far a people's colonies like to stay from home. */
+export const FOREIGN_GAP_KM = 200;
+export const CIV_RADIUS_KM = 150;
+
+/**
+ * Pick a place to settle. `civ` > 0: a colony of that people — it must keep `avoidKm` from its own towns, prefers to stay
+ * within CIV_RADIUS_KM of them, and may not come within FOREIGN_GAP_KM of anybody else. `civ` <= 0: a new people, which
+ * keeps the foreign gap from everyone.
+ */
+/** Pass as `fromComp` when ships can reach any coast. */
+export const ANY_COMP = -7;
+export function findSite(w: World, ox: number, oy: number, radiusKm: number, boat: boolean, fromComp: number, culture: number, avoidKm = 35, civ = 0): { x: number; y: number; score: number } | null {
   const rng = w.rng;
   const planet = w.planet;
   let best: { x: number; y: number; score: number } | null = null;
@@ -98,22 +126,25 @@ export function findSite(w: World, ox: number, oy: number, radiusKm: number, boa
     const i = idx(x, y);
     if (planet.ocean[i] || planet.lake[i] || planet.elev[i] > 2.8 || planet.tempMean[i] < -6 || planet.freshDist[i] > 1) continue;
     const comp = boat ? w.landCompBoat[i] : w.landComp[i];
-    if (comp !== fromComp) continue;
+    if (fromComp !== ANY_COMP && comp !== fromComp) continue;
     // a camp needs enough living land around it to be worth the journey
     let rich = w.env.forageRate(i);
     for (let k = 0; k < 8; k++) { const n = NBR8[i * 8 + k]; if (n >= 0 && !planet.ocean[n]) rich += w.env.forageRate(n); }
     if (rich < 9 * 1.3) continue;
     let crowd = 0;
     let tooClose = false;
+    let kin = 0;
     for (const s of living) {
       const dk = distKm(s.x, s.y, x + 0.5, y + 0.5);
-      if (dk < avoidKm) { tooClose = true; break; }
-      if (dk < 130) crowd += 0.12 * (1 - dk / 130);
+      const own = civ > 0 && s.civ === civ;
+      if (dk < (own ? avoidKm : Math.max(avoidKm, FOREIGN_GAP_KM))) { tooClose = true; break; }
+      if (own && dk < CIV_RADIUS_KM) kin = Math.max(kin, 1 - dk / CIV_RADIUS_KM);
+      if (dk < 90) crowd += 0.1 * (1 - dk / 90);
     }
     if (tooClose) continue;
     let score = w.env.fert[i] + w.env.veg[i] * 0.4 + (planet.coastDist[i] <= 1 ? 0.12 : 0) + (planet.river[i] ? 0.12 : 0)
       + (planet.res.stone[i] + planet.res.clay[i]) / 255 * 0.05 + (planet.res.iron[i] + planet.res.copper[i]) / 255 * 0.08
-      - d / (radiusKm * 2.2) - crowd;
+      - d / (radiusKm * 2.2) - crowd + kin * 0.35;
     const r = regionOfCell(x, y);
     score += Math.min(0.25, w.eco.gameBiomass(r) / 4000) - w.eco.predRisk[r] * 0.2;
     for (let k = 0; k < 8; k++) { const n = NBR8[i * 8 + k]; if (n >= 0 && planet.volcanic[n]) score -= 0.1; }
@@ -218,7 +249,7 @@ export function personStep(w: World, p: Person, dt: number) {
   if (live) {
     if (live.diseaseUntil > day) h += live.disease * 0.6;
     const healers = live.occupations['healer'] ?? 0;
-    h *= 1 - 0.35 * Math.min(1, (healers * 25) / Math.max(1, live.pop));
+    h *= (1 - 0.35 * Math.min(1, (healers * 25) / Math.max(1, live.pop))) * healthMult(live);
   }
   if (rng.next() < 1 - Math.exp((-h * dt) / DAYS_PER_YEAR)) {
     w.die(p, age > 55 ? 'old age' : age < 5 ? 'childhood illness' : 'illness');
@@ -268,12 +299,13 @@ export function personStep(w: World, p: Person, dt: number) {
   if (fd <= 1 || child && live || (live && nearHome && planet.freshDist[idx(wrapX(Math.floor(live.x)), Math.floor(live.y))] <= 1)) needs[ND.thirst] = Math.max(0.05, needs[ND.thirst] - 0.5 * dt);
   else needs[ND.thirst] = Math.min(1, needs[ND.thirst] + Math.min(0.5, carry * dt));
   // cold / heat
-  const T = planet.tempAt(cell, day);
+  const T = w.weather.airTemp(p.x, p.y, day);
   let warmth = 0;
   if (live) {
     if (hasTech(live, 'fire')) warmth += 6;
     if (hasTech(live, 'weaving')) warmth += 6;
     if (live.housing / Math.max(1, live.pop) > 0.4) warmth += 4;
+    else if (planet.cave[cell]) warmth += 5; // a cave keeps out wind and frost
   }
   const cold = clamp((6 - T - warmth) / 30);
   needs[ND.shelter] = cold;
@@ -361,7 +393,7 @@ export function personStep(w: World, p: Person, dt: number) {
 function giveBirth(w: World, m: Person, s: Settlement | undefined) {
   const f = w.people.get(m.pregnancyFather);
   m.pregnantUntil = -1;
-  if (w.rng.chance(0.012)) { w.die(m, 'childbirth'); return; }
+  if (w.rng.chance(0.012 * healthMult(s) * healthMult(s))) { w.die(m, 'childbirth'); return; }
   const c = w.newPerson({ x: m.x, y: m.y, home: m.home, culture: m.culture, species: m.species, mother: m, father: f && f.alive ? f : undefined });
   c.occupation = 'child';
   m.children.push(c.id);
@@ -454,7 +486,7 @@ function actOnGoal(w: World, p: Person, s: Settlement | undefined, dt: number, c
   const budget = fine ? WALK_KMH * 24 * dt : 28 * dt; // km this step
   const rng = w.rng;
   const planet = w.planet;
-  const boat = hasTech(s, 'navigation');
+  const boat = boatOf(s);
   switch (p.goal) {
     case 'rest': {
       const hb = p.house ? w.buildings.get(p.house) : undefined;
@@ -518,7 +550,7 @@ function actOnGoal(w: World, p: Person, s: Settlement | undefined, dt: number, c
       const b = w.bands.get(p.band);
       if (p.occupation === 'hermit' || !b) { wanderAbout(w, p, budget); break; }
       const tx = b.tx; const ty = b.ty;
-      const arrived = walk(w, p, tx, ty, budget, boat || hasTech(w.settlements[b.from - 1], 'navigation'), 1.5);
+      const arrived = walk(w, p, tx, ty, budget * (b.kind === 'army' ? travelMult(w.settlements[b.from - 1]) : 1), Math.max(+boat, boatOf(w.settlements[b.from - 1])) as 0 | 1 | 2, 1.5);
       // travellers carry a ration and forage on the way
       if (p.food < 1) p.food += w.env.takeForage(cell, 1.2 * dt, w.day) * 0.6;
       if (p.id === b.leader) {
@@ -551,7 +583,7 @@ function wanderAbout(w: World, p: Person, budget: number) {
 
 const JOB_ROLES = new Set<string>(['forager', 'hunter', 'farmer', 'woodcutter', 'miner', 'builder', 'crafter', 'trader', 'explorer']);
 
-function work(w: World, p: Person, s: Settlement | undefined, dt: number, cell: number, budget: number, boat: boolean) {
+function work(w: World, p: Person, s: Settlement | undefined, dt: number, cell: number, budget: number, boat: Boat) {
   const planet = w.planet;
   const rng = w.rng;
   if (!s) { wanderAbout(w, p, budget); return; }

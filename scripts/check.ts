@@ -47,5 +47,13 @@ const r1 = deserialize(snap), r2 = deserialize(snap);
 for (let i = 0; i < 300; i++) { r1.step(7); r2.step(7); }
 ok(r1.alive.length === r2.alive.length && r1.stats.births === r2.stats.births && r1.rng.state === r2.rng.state && r1.history.nextId === r2.history.nextId, `deterministic replay from a save (pop ${r1.alive.length})`);
 ok(w.alive.length > 0 && w.activeSettlements().length > 0, 'people and settlements exist after the awakening');
+// 4. a restored world continues exactly like the world it was saved from (no hidden runtime state)
+const r3 = deserialize(snap);
+for (let i = 0; i < 300; i++) { w.step(7); r3.step(7); }
+ok(w.alive.length === r3.alive.length && w.stats.births === r3.stats.births && w.rng.state === r3.rng.state && w.history.nextId === r3.history.nextId, `a restored save continues identically to the original (pop ${w.alive.length})`);
+// 5. weather and the land surface stay physical
+let wet = 0, nl = 0;
+for (let i = 0; i < w.env.soil.length; i++) if (!w.planet.ocean[i]) { nl++; if (w.env.soil[i] >= 0 && w.env.soil[i] <= 1) wet++; }
+ok(wet === nl && w.weather.seasonsObserved > 0, `weather has run (${w.weather.seasonsObserved} seasons) and soil moisture stays within field capacity`);
 
 process.exit(failed ? 1 : 0);
